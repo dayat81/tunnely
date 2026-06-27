@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<navigation xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/nav_graph"
+    app:startDestination="@id/nav_connect">
+
+    <fragment
+        android:id="@+id/nav_connect"
+        android:name="com.tunnely.app.ui.ConnectFragment"
+        android:label="Connect" />
+
+    <fragment
+        android:id="@+id/nav_flows"
+        android:name="com.tunnely.app.ui.FlowsFragment"
+        android:label="Flows" />
+
+    <fragment
+        android:id="@+id/nav_settings"
+        android:name="com.tunnely.app.ui.SettingsFragment"
+        android:label="Settings" />
+
+</navigation>
