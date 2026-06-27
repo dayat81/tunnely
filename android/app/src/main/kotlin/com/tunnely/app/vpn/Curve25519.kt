@@ -45,7 +45,7 @@ object Curve25519 {
     private fun scalarMult(scalar: ByteArray, uCoord: ByteArray): ByteArray {
         // Montgomery ladder for X25519
         val p = 255L
-        val a24 = 121665L
+        val a24 = longArrayOf(121665, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
         val x1 = decodeUCoordinate(uCoord)
         var x2 = longArrayOf(1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
