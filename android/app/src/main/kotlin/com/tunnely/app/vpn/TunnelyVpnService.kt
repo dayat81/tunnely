@@ -11,8 +11,8 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.wireguard.android.backend.GoBackend
+import com.wireguard.android.backend.Tunnel
 import com.wireguard.config.Config
-import com.wireguard.config.InetEndpoint
 import com.wireguard.config.InetNetwork
 import com.wireguard.config.Interface
 import com.wireguard.config.Peer
@@ -21,6 +21,7 @@ import com.tunnely.app.R
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.net.InetAddress
 
 enum class VpnState {
     DISCONNECTED,
@@ -49,7 +50,11 @@ class TunnelyVpnService : VpnService() {
         val trafficStats: StateFlow<TrafficStats> = _trafficStats.asStateFlow()
 
         private var backend: GoBackend? = null
-        private var tunnel: GoBackend.VpnServiceTunnel? = null
+
+        val tunnel = object : Tunnel {
+            override fun getName(): String = TUNNEL_NAME
+            override fun onStateChange(newState: Tunnel.State) {}
+        }
     }
 
     inner class LocalBinder : Binder() {
@@ -107,30 +112,7 @@ class TunnelyVpnService : VpnService() {
 
             val config = buildConfig(prefs)
 
-            if (tunnel == null) {
-                tunnel = object : GoBackend.VpnServiceTunnel {
-                    override fun getName(): String = TUNNEL_NAME
-
-                    override fun onStateChange(state: com.wireguard.tunnel.Tunnel.State) {
-                        _vpnState.value = when (state) {
-                            com.wireguard.tunnel.Tunnel.State.UP -> VpnState.CONNECTED
-                            com.wireguard.tunnel.Tunnel.State.DOWN -> VpnState.DISCONNECTED
-                            com.wireguard.tunnel.Tunnel.State.TOGGLE -> _vpnState.value
-                        }
-                        updateNotification()
-                    }
-
-                    override fun onError(e: Throwable?) {
-                        _vpnState.value = VpnState.ERROR
-                    }
-                }
-            }
-
-            backend?.setState(
-                tunnel!!,
-                com.wireguard.tunnel.Tunnel.State.UP,
-                config
-            )
+            backend!!.setState(tunnel, Tunnel.State.UP, config)
 
             _vpnState.value = VpnState.CONNECTED
             updateNotification()
@@ -141,15 +123,12 @@ class TunnelyVpnService : VpnService() {
         }
     }
 
-    suspend fun disconnect() {
+    suspend fun disconnect(prefs: VpnPreferences) {
         try {
             _vpnState.value = VpnState.DISCONNECTING
-            if (tunnel != null && backend != null) {
-                backend?.setState(
-                    tunnel!!,
-                    com.wireguard.tunnel.Tunnel.State.DOWN,
-                    null
-                )
+            if (backend != null) {
+                val config = buildConfig(prefs)
+                backend!!.setState(tunnel, Tunnel.State.DOWN, config)
             }
             _vpnState.value = VpnState.DISCONNECTED
             _trafficStats.value = TrafficStats()
@@ -163,26 +142,32 @@ class TunnelyVpnService : VpnService() {
     private fun buildConfig(prefs: VpnPreferences): Config {
         val ifaceBuilder = Interface.Builder()
             .parsePrivateKey(prefs.privateKey)
-            .parseDnsServers(prefs.dnsServers)
+            .parseAddresses(prefs.tunnelAddress)
             .parseMtu(prefs.mtu.toString())
 
-        // Add tunnel address
-        if (prefs.tunnelAddress.isNotEmpty()) {
-            ifaceBuilder.parseAddresses(prefs.tunnelAddress)
+        // Add DNS servers
+        for (dns in prefs.dnsServers.split(",").map { it.trim() }) {
+            if (dns.isNotBlank()) {
+                for (addr in InetAddress.getAllByName(dns)) {
+                    ifaceBuilder.addDnsServer(addr)
+                }
+            }
         }
 
-        // Split tunneling
-        if (prefs.splitTunneling) {
-            prefs.splitApps.forEach { pkg ->
-                ifaceBuilder.parseExcludeApplications(pkg)
-            }
+        // Split tunneling: exclude selected apps
+        if (prefs.splitTunneling && prefs.splitApps.isNotEmpty()) {
+            ifaceBuilder.excludeApplications(prefs.splitApps)
         }
 
         val peerBuilder = Peer.Builder()
             .parsePublicKey(prefs.serverPublicKey)
             .parseEndpoint("${prefs.serverAddress}:${prefs.serverPort}")
-            .parseAllowedIPs(prefs.allowedIps)
             .parsePersistentKeepalive("25")
+
+        val allowedIpList = prefs.allowedIps.split(",").map { it.trim() }
+            .filter { it.isNotBlank() }
+            .map { InetNetwork.parse(it) }
+        peerBuilder.addAllowedIps(allowedIpList)
 
         return Config.Builder()
             .setInterface(ifaceBuilder.build())
