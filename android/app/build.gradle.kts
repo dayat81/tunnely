@@ -18,9 +18,9 @@ android {
     signingConfigs {
         create("release") {
             storeFile = file("tunnely-release.jks")
-            storePassword = "tunnely123"
-            keyAlias = "tunnely"
-            keyPassword = "tunnely123"
+            storePassword = System.getenv("KEYSTORE_PASSWORD") ?: "tunnely123"
+            keyAlias = System.getenv("KEY_ALIAS") ?: "tunnely"
+            keyPassword = System.getenv("KEY_PASSWORD") ?: "tunnely123"
         }
     }
 
