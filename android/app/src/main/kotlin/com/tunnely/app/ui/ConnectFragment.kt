@@ -275,7 +275,7 @@ class ConnectFragment : Fragment() {
                 Log.i(TAG, "Client pubkey: ${prefs.publicKey}")
                 Log.i(TAG, "Tunnel address: ${prefs.tunnelAddress}")
 
-                // Step 1: Auto-register peer with server (updates prefs with server key + tunnel IP)
+                // Step 1: Auto-register peer with server (MANDATORY — gets correct server pubkey)
                 withContext(Dispatchers.Main) {
                     statusText.text = "Registering..."
                     statusSubtext.text = "Registering peer with server"
@@ -288,7 +288,14 @@ class ConnectFragment : Fragment() {
                     prefs.tunnelAddress = registration.tunnelAddress
                     Log.i(TAG, "✅ Peer registered: ${registration.tunnelAddress}, server_key=${registration.serverPublicKey}")
                 } catch (e: Exception) {
-                    Log.w(TAG, "⚠️ Auto-register failed (non-fatal): ${e.message}")
+                    Log.e(TAG, "❌ Auto-register FAILED — cannot connect without server pubkey: ${e.message}")
+                    withContext(Dispatchers.Main) {
+                        statusText.text = "Registration Failed"
+                        statusSubtext.text = "Cannot reach server: ${e.message}"
+                        btnConnect.isEnabled = true
+                        stopPulseAnimation()
+                    }
+                    return@launch
                 }
 
                 // Step 2: Connect VPN via GoBackend

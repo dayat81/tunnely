@@ -176,3 +176,6 @@ if __name__ == "__main__":
     server = HTTPServer(("127.0.0.1", LISTEN_PORT), Handler)
     print(f"[wg-monitor] Listening on 127.0.0.1:{LISTEN_PORT}")
     server.serve_forever()
+
+
+# Also mount on port 8800 (antilemot-api) for Tunnely app
