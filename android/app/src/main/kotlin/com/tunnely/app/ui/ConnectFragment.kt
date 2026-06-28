@@ -284,15 +284,8 @@ class ConnectFragment : Fragment() {
                     RemoteLogger.i(TAG, "Step 1: Auto-registering peer...")
                     val apiClient = ApiClient(prefs.serverAddress, prefs.serverPort)
                     // Let server generate keypair — don't send client public key
-                    val registration = apiClient.registerClient()
+                    val registration = apiClient.registerClient(prefs.publicKey)
                     prefs.serverPublicKey = registration.serverPublicKey
-                registration.privateKey?.let { newPrivKey -> prefs.privateKey = newPrivKey }
-                    prefs.tunnelAddress = registration.tunnelAddress
-                    // Use server-generated private key if available
-                    registration.privateKey?.let { newPrivKey ->
-                        RemoteLogger.i(TAG, "  Using server-generated private key")
-                        prefs.privateKey = newPrivKey
-                    }
                     RemoteLogger.i(TAG, "✅ Peer registered: ${registration.tunnelAddress}, server_key=${registration.serverPublicKey}")
                 } catch (e: Exception) {
                     RemoteLogger.e(TAG, "❌ Auto-register FAILED — cannot connect without server pubkey: ${e.message}")
@@ -343,17 +336,9 @@ class ConnectFragment : Fragment() {
                 val prefs = app.prefs
                 val apiClient = ApiClient(prefs.serverAddress, prefs.serverPort)
 
-                val registration = apiClient.registerClient()
+                val registration = apiClient.registerClient(prefs.publicKey)
 
                 prefs.serverPublicKey = registration.serverPublicKey
-                registration.privateKey?.let { newPrivKey -> prefs.privateKey = newPrivKey }
-                prefs.tunnelAddress = registration.tunnelAddress
-
-                withContext(Dispatchers.Main) {
-                    updateDisplay()
-                    btnAutoConfig.text = "Auto Config ✓"
-                    btnAutoConfig.isEnabled = true
-                }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     btnAutoConfig.text = "Config Failed"

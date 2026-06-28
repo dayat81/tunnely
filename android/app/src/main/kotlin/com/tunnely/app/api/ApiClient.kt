@@ -15,8 +15,7 @@ import java.util.concurrent.TimeUnit
 data class VpnRegistration(
     val serverPublicKey: String,
     val tunnelAddress: String,
-    val endpoint: String,
-    val privateKey: String? = null  // Server-generated private key (if available)
+    val endpoint: String
 )
 
 class ApiClient(
@@ -33,17 +32,15 @@ class ApiClient(
 
     /**
      * Register client with the VPN server and get configuration.
-     * POST /api/vpn/register — server generates keypair for reliability.
+     * POST /api/vpn/register with client public key.
      */
-    suspend fun registerClient(clientPublicKey: String? = null): VpnRegistration =
+    suspend fun registerClient(clientPublicKey: String): VpnRegistration =
         withContext(Dispatchers.IO) {
             val url = "$baseUrl/api/vpn/register"
             Log.i("ApiClient", "📡 POST $url")
-            val json = JSONObject()
-            // Only send public key if explicitly provided (backward compat)
-            // Let server generate keys for maximum WireGuard compatibility
-            if (clientPublicKey != null) {
-                json.put("public_key", clientPublicKey)
+            Log.i("ApiClient", "  public_key=$clientPublicKey")
+            val json = JSONObject().apply {
+                put("public_key", clientPublicKey)
             }
 
             val request = Request.Builder()
@@ -68,15 +65,12 @@ class ApiClient(
             } else {
                 data.optString("tunnel_address", "")
             }
-            // Server may return a private key (server-side generation)
-            val privateKey = data.optString("private_key", null)
             val reg = VpnRegistration(
                 serverPublicKey = data.getString("server_public_key"),
                 tunnelAddress = tunnelAddress,
-                endpoint = "$serverAddress:$serverPort",
-                privateKey = privateKey
+                endpoint = "$serverAddress:$serverPort"
             )
-            Log.i("ApiClient", "  ✅ Registered: tunnel=${reg.tunnelAddress}, server_key=${reg.serverPublicKey}, has_private_key=${reg.privateKey != null}")
+            Log.i("ApiClient", "  ✅ Registered: tunnel=${reg.tunnelAddress}, server_key=${reg.serverPublicKey}")
             reg
         }
 

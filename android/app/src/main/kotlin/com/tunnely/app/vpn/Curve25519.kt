@@ -4,13 +4,18 @@ import android.util.Base64
 import java.security.SecureRandom
 
 /**
- * Pure Java implementation of Curve25519 key generation (RFC 7748).
- * Used for WireGuard key pairs.
+ * Curve25519 scalar-basepoint multiplication (RFC 7748).
+ * Used for WireGuard public key derivation from private key.
+ * Uses Java's built-in BigInteger for field arithmetic.
+ * (Copied from netprobe AnalysisVpnService — proven working)
  */
 object Curve25519 {
 
-    private const val KEY_SIZE = 32
-    private val random = SecureRandom()
+    private val P = java.math.BigInteger(
+        "57896044618658097711785492504343953926634992332820282019728792003956564819949",
+    )
+    private val A24 = java.math.BigInteger("121666")
+    private val BASE = java.math.BigInteger("9")
 
     data class KeyPair(
         val privateKey: ByteArray,
@@ -23,10 +28,9 @@ object Curve25519 {
     }
 
     fun generateKeyPair(): KeyPair {
-        val privateKey = ByteArray(KEY_SIZE)
-        random.nextBytes(privateKey)
-
-        // Clamp private key per RFC 7748
+        val privateKey = ByteArray(32)
+        SecureRandom().nextBytes(privateKey)
+        // Clamp per Curve25519 / WireGuard spec
         privateKey[0] = (privateKey[0].toInt() and 248).toByte()
         privateKey[31] = (privateKey[31].toInt() and 127).toByte()
         privateKey[31] = (privateKey[31].toInt() or 64).toByte()
@@ -35,144 +39,76 @@ object Curve25519 {
         return KeyPair(privateKey, publicKey)
     }
 
-    private fun scalarMultBase(scalar: ByteArray): ByteArray {
-        // Simplified X25519 base point scalar multiplication
-        // Base point u-coordinate = 9
-        val baseU = longArrayOf(9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-        return scalarMult(scalar, encodeUCoordinate(baseU))
-    }
+    fun scalarMultBase(scalar: ByteArray): ByteArray {
+        // Clamp the scalar per RFC 7748
+        val clamped = scalar.clone()
+        clamped[0] = (clamped[0].toInt() and 248).toByte()
+        clamped[31] = (clamped[31].toInt() and 127).toByte()
+        clamped[31] = (clamped[31].toInt() or 64).toByte()
 
-    private fun scalarMult(scalar: ByteArray, uCoord: ByteArray): ByteArray {
-        // Montgomery ladder for X25519
-        val p = 255L
-        val a24 = longArrayOf(121665, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        val s = bytesToLittleEndian(clamped)
+        var x1 = BASE
+        var x2 = java.math.BigInteger.ONE
+        var z2 = java.math.BigInteger.ZERO
+        var x3 = BASE
+        var z3 = java.math.BigInteger.ONE
+        var swap = 0
 
-        val x1 = decodeUCoordinate(uCoord)
-        var x2 = longArrayOf(1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-        var z2 = longArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-        var x3 = x1.copyOf()
-        var z3 = longArrayOf(1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-
-        var swap = 0L
-        for (t in (p - 1) downTo 0) {
-            val kt = ((scalar[(t / 8).toInt()].toInt() shr (t % 8).toInt()) and 1).toLong()
-            swap = swap xor kt
-            conditionalSwap(x2, x3, swap)
-            conditionalSwap(z2, z3, swap)
-            swap = kt
-
-            val a = add(x2, z2)
-            val aa = sqr(a)
-            val b = sub(x2, z2)
-            val bb = sqr(b)
-            val e = sub(aa, bb)
-            val c = add(x3, z3)
-            val d = sub(x3, z3)
-            val da = mul(d, a)
-            val cb = mul(c, b)
-
-            x3 = sqr(add(da, cb))
-            z3 = mul(x1, sqr(sub(da, cb)))
-            x2 = mul(aa, bb)
-            z2 = mul(e, add(aa, mul(a24, e)))
-        }
-        conditionalSwap(x2, x3, swap)
-        conditionalSwap(z2, z3, swap)
-
-        val result = mul(x2, modInverse(z2))
-        return encodeUCoordinate(result)
-    }
-
-    // Field arithmetic modulo 2^255 - 19
-    private fun add(a: LongArray, b: LongArray): LongArray {
-        val r = LongArray(16)
-        for (i in 0 until 16) r[i] = a[i] + b[i]
-        return r
-    }
-
-    private fun sub(a: LongArray, b: LongArray): LongArray {
-        val r = LongArray(16)
-        for (i in 0 until 16) r[i] = a[i] - b[i]
-        return reduce(r)
-    }
-
-    private fun mul(a: LongArray, b: LongArray): LongArray {
-        val r = LongArray(31)
-        for (i in 0 until 16) {
-            for (j in 0 until 16) {
-                r[i + j] += a[i] * b[j]
+        for (t in 254 downTo 0) {
+            val kt = s.testBit(t)
+            val b = if (kt) 1 else 0
+            swap = swap xor b
+            if (swap == 1) {
+                val tx = x2; x2 = x3; x3 = tx
+                val tz = z2; z2 = z3; z3 = tz
             }
+            swap = b
+
+            val a = x2.add(z2).mod(P)
+            val aa = a.multiply(a).mod(P)
+            val b2 = x2.subtract(z2).mod(P)
+            val bb = b2.multiply(b2).mod(P)
+            val e = aa.subtract(bb).mod(P)
+            val c = x3.add(z3).mod(P)
+            val d = x3.subtract(z3).mod(P)
+            val da = d.multiply(a).mod(P)
+            val cb = c.multiply(b2).mod(P)
+            x3 = da.add(cb).mod(P)
+            x3 = x3.multiply(x3).mod(P)
+            z3 = da.subtract(cb).mod(P)
+            z3 = z3.multiply(z3).mod(P)
+            z3 = z3.multiply(x1).mod(P)
+            x2 = aa.multiply(bb).mod(P)
+            z2 = e.multiply(aa.add(A24.multiply(e).mod(P)).mod(P)).mod(P)
         }
-        return reduce(r)
-    }
 
-    private fun sqr(a: LongArray): LongArray = mul(a, a)
-
-    private fun reduce(r: LongArray): LongArray {
-        val out = LongArray(16)
-        System.arraycopy(r, 0, out, 0, minOf(r.size, 16))
-
-        // Carry chain
-        for (i in 0 until 15) {
-            out[i + 1] += out[i] shr 16
-            out[i] = out[i] and 0xFFFF
+        if (swap == 1) {
+            val tx = x2; x2 = x3; x3 = tx
+            val tz = z2; z2 = z3; z3 = tz
         }
-        out[0] += (out[15] shr 16) * 19
-        out[15] = out[15] and 0xFFFF
-        out[1] += out[0] shr 16
-        out[0] = out[0] and 0xFFFF
 
-        return out
+        val invZ = z2.modPow(P.subtract(java.math.BigInteger("2")), P)
+        val result = x2.multiply(invZ).mod(P)
+        return littleEndianToBytes(result, 32)
     }
 
-    private fun modInverse(a: LongArray): LongArray {
-        // a^(p-2) mod p using Fermat's little theorem
-        // Simplified: compute a^(2^255 - 21) — for production use a proper implementation
-        var result = longArrayOf(1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-        val base = a.copyOf()
-
-        // Exponent: 2^255 - 21
-        // This is a simplified version; full X25519 uses specific chain
-        result = base.copyOf()
-        for (i in 0 until 253) {
-            result = sqr(result)
-            result = mul(result, base)
-        }
-        result = sqr(result)
-        result = sqr(result)
-        result = mul(result, base)
-
-        return result
-    }
-
-    private fun conditionalSwap(a: LongArray, b: LongArray, swap: LongArray) {
-        // Use Long scalar swap
-        conditionalSwap(a, b, swap[0])
-    }
-
-    private fun conditionalSwap(a: LongArray, b: LongArray, swap: Long) {
-        val mask = -swap
-        for (i in 0 until 16) {
-            val t = mask and (a[i] xor b[i])
-            a[i] = a[i] xor t
-            b[i] = b[i] xor t
-        }
-    }
-
-    private fun decodeUCoordinate(bytes: ByteArray): LongArray {
-        val result = LongArray(16)
-        for (i in 0 until minOf(bytes.size, 32)) {
-            result[i / 2] = result[i / 2] or ((bytes[i].toLong() and 0xFF) shl (8 * (i % 2)))
+    private fun bytesToLittleEndian(bytes: ByteArray): java.math.BigInteger {
+        var result = java.math.BigInteger.ZERO
+        for (i in bytes.indices) {
+            result = result.or(
+                java.math.BigInteger.valueOf((bytes[i].toLong() and 0xFF)).shiftLeft(i * 8),
+            )
         }
         return result
     }
 
-    private fun encodeUCoordinate(u: LongArray): ByteArray {
-        val r = reduce(u)
-        val bytes = ByteArray(KEY_SIZE)
-        for (i in 0 until 32) {
-            bytes[i] = ((r[i / 2].toInt() shr (8 * (i % 2))) and 0xFF).toByte()
+    private fun littleEndianToBytes(value: java.math.BigInteger, length: Int): ByteArray {
+        val result = ByteArray(length)
+        var v = value
+        for (i in 0 until length) {
+            result[i] = (v.and(java.math.BigInteger.valueOf(0xFF))).toByte()
+            v = v.shiftRight(8)
         }
-        return bytes
+        return result
     }
 }
