@@ -198,6 +198,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._cors_headers()
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": str(e)}).encode())
+        elif self.path == "/api/vpn/logs/clear":
+            try:
+                with _log_lock:
+                    open(LOG_FILE, "w").close()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "cleared"}).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
         else:
             self.send_response(404)
             self.end_headers()
@@ -227,6 +240,66 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps(resp).encode())
+
+        elif self.path == "/api/vpn/logs/view":
+            # Return last 200 log entries as JSON
+            try:
+                lines = []
+                if os.path.exists(LOG_FILE):
+                    with open(LOG_FILE, "r") as f:
+                        all_lines = f.readlines()
+                        lines = all_lines[-200:]
+                entries = [json.loads(l) for l in lines if l.strip()]
+                resp = {"total": len(entries), "logs": entries}
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps(resp).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
+
+        elif self.path == "/logs":
+            # Simple HTML log viewer
+            html = """<!DOCTYPE html>
+<html><head><meta charset='utf-8'><title>Tunnely Device Logs</title>
+<style>
+body{background:#0d1117;color:#c9d1d9;font-family:monospace;margin:20px}
+h1{color:#58a6ff;font-size:20px}
+.log{padding:2px 4px;border-bottom:1px solid #21262d;font-size:12px}
+.INFO{color:#3fb950}.ERROR{color:#f85149}.WARN{color:#d29922}.DEBUG{color:#8b949e}
+.ts{color:#484f58}.tag{color:#58a6ff;font-weight:bold}
+#controls{margin:12px 0}
+button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:6px 12px;cursor:pointer;border-radius:4px}
+button:hover{background:#30363d}
+#count{color:#8b949e;margin-left:12px}
+</style></head><body>
+<h1>Tunnely Device Logs</h1>
+<div id='controls'>
+<button onclick='load()'>Refresh</button>
+<button onclick='clear()'>Clear Server Logs</button>
+<span id='count'></span>
+</div>
+<div id='logs'></div>
+<script>
+async function load(){
+  const r=await fetch('/api/vpn/logs/view');const d=await r.json();
+  document.getElementById('count').textContent=d.total+' entries';
+  document.getElementById('logs').innerHTML=d.logs.map(l=>
+    '<div class="log '+l.level+'"><span class="ts">'+l.ts+'</span> <span class="tag">['+l.tag+']</span> '+l.msg+(l.stack?'<pre>'+l.stack+'</pre>':'')+'</div>'
+  ).reverse().join('');
+}
+async function clear(){
+  await fetch('/api/vpn/logs/clear',{method:'POST'});load();
+}
+load();setInterval(load,5000);
+</script></body></html>"""
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(html.encode())
 
         elif self.path == "/" or self.path == "/dashboard":
             try:
