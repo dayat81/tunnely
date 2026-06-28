@@ -257,11 +257,32 @@ class TunnelyVpnService : LifecycleService() {
                             val stats = currentBackend.getStatistics(tunnel)
                             val totalRx = stats.totalRx()
                             val totalTx = stats.totalTx()
+
+                            // FIX: read handshake timestamp from PeerStats — previously never
+                            // updated, so handshakeAge stayed -1 forever ("⏳ Waiting for handshake...")
+                            var hsAge = -1L
+                            var hsEpoch = 0L
+                            val peerKeys = stats.peers()
+                            if (peerKeys.isNotEmpty()) {
+                                val ps = stats.peer(peerKeys[0])
+                                if (ps != null) {
+                                    val hsMillis = ps.latestHandshakeEpochMillis()
+                                    if (hsMillis > 0) {
+                                        hsEpoch = hsMillis
+                                        hsAge = (System.currentTimeMillis() - hsMillis) / 1000
+                                    }
+                                }
+                            }
+
                             _connectionHealth.value = _connectionHealth.value.copy(
+                                handshakeAge = hsAge,
+                                lastHandshakeEpoch = hsEpoch,
                                 transferRx = totalRx,
                                 transferTx = totalTx
                             )
-                        } catch (_: Exception) {}
+                        } catch (e: Exception) {
+                            RemoteLogger.w(TAG, "Stats read error: ${e.message}")
+                        }
 
                     } catch (e: CancellationException) {
                         throw e
