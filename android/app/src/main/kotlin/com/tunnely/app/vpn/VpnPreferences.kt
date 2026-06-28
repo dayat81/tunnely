@@ -22,26 +22,11 @@ class VpnPreferences(context: Context) {
         set(value) = prefs.edit().putString("dns_servers", value).apply()
 
     var privateKey: String
-        get() {
-            var key = prefs.getString("private_key", null)
-            if (key == null) {
-                val kp = Curve25519.generateKeyPair()
-                key = kp.privateKeyBase64
-                prefs.edit()
-                    .putString("private_key", key)
-                    .putString("public_key", kp.publicKeyBase64)
-                    .apply()
-            }
-            return key
-        }
+        get() = prefs.getString("private_key", "") ?: ""
         set(value) = prefs.edit().putString("private_key", value).apply()
 
     var publicKey: String
-        get() {
-            // Ensure key pair is generated
-            prefs.getString("private_key", null) ?: run { privateKey = privateKey }
-            return prefs.getString("public_key", "") ?: ""
-        }
+        get() = prefs.getString("public_key", "") ?: ""
         set(value) = prefs.edit().putString("public_key", value).apply()
 
     var serverPublicKey: String
@@ -49,7 +34,7 @@ class VpnPreferences(context: Context) {
         set(value) = prefs.edit().putString("server_public_key", value).apply()
 
     var tunnelAddress: String
-        get() = prefs.getString("tunnel_address", DEFAULT_TUNNEL_ADDRESS) ?: DEFAULT_TUNNEL_ADDRESS
+        get() = prefs.getString("tunnel_address", "") ?: ""
         set(value) = prefs.edit().putString("tunnel_address", value).apply()
 
     var mtu: Int
@@ -76,13 +61,46 @@ class VpnPreferences(context: Context) {
         get() = prefs.getBoolean("remote_logging", false)
         set(value) = prefs.edit().putBoolean("remote_logging", value).apply()
 
-    fun regenerateKeys(): String {
-        val kp = Curve25519.generateKeyPair()
-        prefs.edit()
-            .putString("private_key", kp.privateKeyBase64)
-            .putString("public_key", kp.publicKeyBase64)
-            .apply()
-        return kp.publicKeyBase64
+    /** Check if we have a valid VPN config (like netprobe AnalysisPreferences.hasConfig) */
+    fun hasConfig(): Boolean {
+        return privateKey.isNotBlank() &&
+            publicKey.isNotBlank() &&
+            serverPublicKey.isNotBlank() &&
+            tunnelAddress.isNotBlank()
+    }
+
+    /**
+     * Generate a new WireGuard keypair (like netprobe AnalysisVpnService.generateKeyPair).
+     * Uses the same BigInteger Curve25519 that netprobe uses.
+     * Returns the public key base64 string.
+     */
+    fun generateKeyPair(): String {
+        val privBytes = ByteArray(32)
+        java.security.SecureRandom().nextBytes(privBytes)
+        // Clamp per Curve25519 / WireGuard spec
+        privBytes[0] = (privBytes[0].toInt() and 248).toByte()
+        privBytes[31] = (privBytes[31].toInt() and 127).toByte()
+        privBytes[31] = (privBytes[31].toInt() or 64).toByte()
+
+        val pubBytes = Curve25519.scalarMultBase(privBytes)
+
+        privateKey = Base64.encodeToString(privBytes, Base64.NO_WRAP)
+        publicKey = Base64.encodeToString(pubBytes, Base64.NO_WRAP)
+        return publicKey
+    }
+
+    /**
+     * Derive public key from existing private key (like netprobe displayClientPublicKey).
+     */
+    fun derivePublicKey(): String {
+        if (privateKey.isBlank()) return ""
+        return try {
+            val privBytes = Base64.decode(privateKey, Base64.NO_WRAP)
+            val pubBytes = Curve25519.scalarMultBase(privBytes)
+            Base64.encodeToString(pubBytes, Base64.NO_WRAP)
+        } catch (_: Exception) {
+            ""
+        }
     }
 
     fun decodePrivateKey(): ByteArray {
@@ -101,6 +119,5 @@ class VpnPreferences(context: Context) {
 
     companion object {
         const val DEFAULT_SERVER_PUBKEY = "LD7xNAw6Sn7Q0dIhJ211y24Il/oTeCXgGyEaOGIwZSE="
-        const val DEFAULT_TUNNEL_ADDRESS = "10.10.0.45/32"
     }
 }

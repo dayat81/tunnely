@@ -12,7 +12,6 @@ import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
 import com.tunnely.app.MainActivity
 import com.tunnely.app.R
-import com.tunnely.app.api.ApiClient
 import com.tunnely.app.vpn.RemoteLogger
 import com.wireguard.android.backend.GoBackend
 import com.wireguard.android.backend.Tunnel
@@ -169,22 +168,8 @@ class TunnelyVpnService : LifecycleService() {
 
         connectJob = serviceScope.launch {
             try {
-                // Step 1: Auto-register peer on server (MUST save tunnel address from response)
-                try {
-                    val apiClient = ApiClient(prefs.serverAddress, prefs.serverPort)
-                    val clientPubkey = prefs.publicKey
-                    if (clientPubkey.isNotBlank()) {
-                        RemoteLogger.i(TAG, "Step 1: Auto-registering peer: $clientPubkey")
-                        val reg = apiClient.registerClient(clientPubkey)
-                        prefs.serverPublicKey = reg.serverPublicKey
-                        prefs.tunnelAddress = reg.tunnelAddress
-                        RemoteLogger.i(TAG, "Step 1: ✅ Registered: tunnel=${reg.tunnelAddress}")
-                    } else {
-                        RemoteLogger.w(TAG, "Step 1: ⚠️ Public key is blank!")
-                    }
-                } catch (e: Exception) {
-                    RemoteLogger.w(TAG, "Step 1: ⚠️ Auto-register failed (non-fatal): ${e.message}")
-                }
+                // Step 1: Config already saved by ConnectFragment (like netprobe)
+                RemoteLogger.i(TAG, "Step 1: Using config from prefs: tunnel=${prefs.tunnelAddress}, pubkey=${prefs.publicKey.take(12)}...")
 
                 // Step 2: Probe MTU
                 try {

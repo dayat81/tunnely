@@ -127,7 +127,7 @@ class ConnectFragment : Fragment() {
 
         btnRegenerate.setOnClickListener {
             val app = requireActivity().application as TunnelyApp
-            val newPubkey = app.prefs.regenerateKeys()
+            val newPubkey = app.prefs.generateKeyPair()
             clientPubkey.text = truncateKey(newPubkey)
         }
 
@@ -270,25 +270,40 @@ class ConnectFragment : Fragment() {
                 val app = requireActivity().application as TunnelyApp
                 val prefs = app.prefs
 
+                // Step 1: Generate keypair if not exists (like netprobe autoConfig)
+                if (prefs.privateKey.isBlank()) {
+                    RemoteLogger.i(TAG, "Step 1: Generating new WireGuard keypair...")
+                    val pubKey = prefs.generateKeyPair()
+                    RemoteLogger.i(TAG, "  Generated pubkey: $pubKey")
+                } else {
+                    // Verify public key matches private key (re-derive)
+                    val derivedPub = prefs.derivePublicKey()
+                    if (derivedPub != prefs.publicKey) {
+                        RemoteLogger.w(TAG, "Step 1: Public key mismatch — re-deriving from private key")
+                        prefs.publicKey = derivedPub
+                    }
+                    RemoteLogger.i(TAG, "Step 1: Using existing keypair, pubkey: ${prefs.publicKey}")
+                }
+
                 RemoteLogger.i(TAG, "Server: ${prefs.serverAddress}:${prefs.serverPort}")
                 RemoteLogger.i(TAG, "Server pubkey: ${prefs.serverPublicKey}")
                 RemoteLogger.i(TAG, "Client pubkey: ${prefs.publicKey}")
-                RemoteLogger.i(TAG, "Tunnel address: ${prefs.tunnelAddress}")
 
-                // Step 1: Auto-register peer with server (MANDATORY — gets correct server pubkey)
+                // Step 2: Register with server (like netprobe registerWithServer)
                 withContext(Dispatchers.Main) {
                     statusText.text = "Registering..."
                     statusSubtext.text = "Registering peer with server"
                 }
                 try {
-                    RemoteLogger.i(TAG, "Step 1: Auto-registering peer...")
+                    RemoteLogger.i(TAG, "Step 2: Registering with server...")
                     val apiClient = ApiClient(prefs.serverAddress, prefs.serverPort)
-                    // Let server generate keypair — don't send client public key
-                    val registration = apiClient.registerClient(prefs.publicKey)
-                    prefs.serverPublicKey = registration.serverPublicKey
-                    RemoteLogger.i(TAG, "✅ Peer registered: ${registration.tunnelAddress}, server_key=${registration.serverPublicKey}")
+                    val result = apiClient.registerClient(prefs.publicKey)
+                    // Save ALL config from response (exactly like netprobe)
+                    prefs.serverPublicKey = result.serverPublicKey
+                    prefs.tunnelAddress = result.tunnelAddress
+                    RemoteLogger.i(TAG, "  ✅ Registered: tunnel=${result.tunnelAddress}, server_key=${result.serverPublicKey}")
                 } catch (e: Exception) {
-                    RemoteLogger.e(TAG, "❌ Auto-register FAILED — cannot connect without server pubkey: ${e.message}")
+                    RemoteLogger.e(TAG, "  ❌ Registration failed: ${e.message}")
                     withContext(Dispatchers.Main) {
                         statusText.text = "Registration Failed"
                         statusSubtext.text = "Cannot reach server: ${e.message}"
@@ -298,15 +313,28 @@ class ConnectFragment : Fragment() {
                     return@launch
                 }
 
-                // Step 2: Connect VPN via GoBackend
+                // Step 3: Verify config (like netprobe hasConfig check)
+                if (!prefs.hasConfig()) {
+                    RemoteLogger.e(TAG, "Step 3: ❌ Invalid config — missing fields")
+                    withContext(Dispatchers.Main) {
+                        statusText.text = "Config Error"
+                        statusSubtext.text = "Missing VPN config — try again"
+                        btnConnect.isEnabled = true
+                        stopPulseAnimation()
+                    }
+                    return@launch
+                }
+                RemoteLogger.i(TAG, "Step 3: ✅ Config valid: tunnel=${prefs.tunnelAddress}")
+
+                // Step 4: Connect VPN via GoBackend
                 withContext(Dispatchers.Main) {
                     statusText.text = "Connecting..."
                     statusSubtext.text = "Establishing VPN tunnel"
                 }
-                RemoteLogger.i(TAG, "Step 2: Calling TunnelyVpnService.connect()...")
+                RemoteLogger.i(TAG, "Step 4: Calling TunnelyVpnService.connect()...")
                 TunnelyVpnService.connect(requireContext(), prefs)
                 connectStartTime = System.currentTimeMillis()
-                RemoteLogger.i(TAG, "✅ TunnelyVpnService.connect() called")
+                RemoteLogger.i(TAG, "  ✅ TunnelyVpnService.connect() called")
 
             } catch (e: Exception) {
                 RemoteLogger.e(TAG, "❌ Connect failed", e)
