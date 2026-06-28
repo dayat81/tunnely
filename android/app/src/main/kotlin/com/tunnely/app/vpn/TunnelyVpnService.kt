@@ -194,6 +194,12 @@ class TunnelyVpnService : VpnService() {
         try {
             _vpnState.value = VpnState.CONNECTING
 
+            // CRITICAL: Resolve hostname BEFORE establishing TUN.
+            // After builder.establish(), all DNS traffic routes through the VPN tunnel.
+            // Since WireGuard isn't configured yet, DNS resolution would fail/timeout.
+            val resolvedEndpoint = resolveEndpoint(prefs.serverAddress, prefs.serverPort)
+            Log.d(TAG, "Endpoint resolved: ${prefs.serverAddress} -> $resolvedEndpoint")
+
             // Build VPN tunnel
             val builder = Builder()
                 .setSession(TUNNEL_NAME)
@@ -235,10 +241,6 @@ class TunnelyVpnService : VpnService() {
             val fd = builder.establish()
                 ?: throw Exception("Failed to establish TUN - VPN permission not granted?")
             tunFd = fd
-
-            // Resolve hostname BEFORE establishing TUN (after establish(), DNS goes through tunnel and fails)
-            val resolvedEndpoint = resolveEndpoint(prefs.serverAddress, prefs.serverPort)
-            Log.d(TAG, "Endpoint resolved: ${prefs.serverAddress} -> $resolvedEndpoint")
 
             // Build WireGuard UAPI config (NO mtu, NO listen_port)
             val privateKeyBytes = prefs.decodePrivateKey()
@@ -333,12 +335,41 @@ class TunnelyVpnService : VpnService() {
 
     private fun resolveEndpoint(host: String, port: Int): String {
         // If already an IP, just use it
-        if (host.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$"))) return "$host:$port"
-        // Resolve hostname to IP — MUST happen before TUN is established
-        val addr = java.net.InetAddress.getByName(host)
-        val ip = addr.hostAddress ?: throw Exception("DNS resolution returned null for '$host'")
-        Log.d(TAG, "Resolved endpoint: $host -> $ip:$port")
-        return "$ip:$port"
+        if (isIpAddress(host)) return "$host:$port"
+
+        // Resolve hostname to IP with retries — MUST happen before TUN is established
+        val maxRetries = 3
+        var lastException: Exception? = null
+        for (attempt in 1..maxRetries) {
+            try {
+                val addr = java.net.InetAddress.getByName(host)
+                val ip = addr.hostAddress
+                    ?: throw Exception("DNS resolution returned null for '$host'")
+                // Validate it's actually an IP address, not a hostname passed through
+                if (!isIpAddress(ip)) {
+                    throw Exception("DNS resolution returned non-IP value '$ip' for '$host'")
+                }
+                Log.d(TAG, "Resolved endpoint: $host -> $ip:$port (attempt $attempt)")
+                return "$ip:$port"
+            } catch (e: java.net.UnknownHostException) {
+                lastException = e
+                Log.w(TAG, "DNS resolution failed for '$host' (attempt $attempt/$maxRetries): ${e.message}")
+                if (attempt < maxRetries) {
+                    Thread.sleep(500L * attempt) // backoff before retry
+                }
+            } catch (e: Exception) {
+                lastException = e
+                Log.w(TAG, "Endpoint resolution error for '$host' (attempt $attempt/$maxRetries): ${e.message}")
+                if (attempt < maxRetries) {
+                    Thread.sleep(500L * attempt)
+                }
+            }
+        }
+        throw Exception("Failed to resolve endpoint hostname '$host' after $maxRetries attempts: ${lastException?.message}", lastException)
+    }
+
+    private fun isIpAddress(host: String): Boolean {
+        return host.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$")) || host.contains(":")
     }
 
     private fun bytesToHex(bytes: ByteArray): String {
