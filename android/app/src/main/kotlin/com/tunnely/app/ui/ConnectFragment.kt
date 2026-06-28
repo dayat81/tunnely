@@ -37,12 +37,12 @@ class ConnectFragment : Fragment() {
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        Log.i(TAG, "🔴 VPN permission result: resultCode=${result.resultCode} (OK=${Activity.RESULT_OK})")
+        RemoteLogger.i(TAG, "🔴 VPN permission result: resultCode=${result.resultCode} (OK=${Activity.RESULT_OK})")
         if (result.resultCode == Activity.RESULT_OK) {
-            Log.i(TAG, "✅ VPN permission granted, calling doConnect()...")
+            RemoteLogger.i(TAG, "✅ VPN permission granted, calling doConnect()...")
             doConnect()
         } else {
-            Log.w(TAG, "❌ VPN permission denied! resultCode=${result.resultCode}")
+            RemoteLogger.w(TAG, "❌ VPN permission denied! resultCode=${result.resultCode}")
             statusText.text = "Permission denied"
             statusSubtext.text = "VPN permission required"
             btnConnect.isEnabled = true
@@ -109,18 +109,18 @@ class ConnectFragment : Fragment() {
     private fun setupClickListeners() {
         btnConnect.setOnClickListener {
             val currentState = TunnelyVpnService.vpnState.value
-            Log.i(TAG, "🔵 CONNECT BUTTON CLICKED! currentState=$currentState")
+            RemoteLogger.i(TAG, "🔵 CONNECT BUTTON CLICKED! currentState=$currentState")
             when (currentState) {
                 VpnState.DISCONNECTED, VpnState.ERROR -> {
-                    Log.i(TAG, "→ Calling startConnect()")
+                    RemoteLogger.i(TAG, "→ Calling startConnect()")
                     startConnect()
                 }
                 VpnState.CONNECTED -> {
-                    Log.i(TAG, "→ Calling startDisconnect()")
+                    RemoteLogger.i(TAG, "→ Calling startDisconnect()")
                     startDisconnect()
                 }
                 else -> {
-                    Log.w(TAG, "→ Ignoring click, transitioning state: $currentState")
+                    RemoteLogger.w(TAG, "→ Ignoring click, transitioning state: $currentState")
                 }
             }
         }
@@ -242,7 +242,7 @@ class ConnectFragment : Fragment() {
     }
 
     private fun startConnect() {
-        Log.i(TAG, "🟢 startConnect() called")
+        RemoteLogger.i(TAG, "🟢 startConnect() called")
         btnConnect.isEnabled = false
         statusText.text = "Requesting VPN permission..."
         statusSubtext.text = "Checking permissions"
@@ -251,29 +251,29 @@ class ConnectFragment : Fragment() {
 
         // Check VPN permission FIRST (must be from Activity context)
         val prepareIntent = VpnService.prepare(requireContext())
-        Log.i(TAG, "VPN prepare result: ${if (prepareIntent != null) "NEED_PERMISSION" else "ALREADY_GRANTED"}")
+        RemoteLogger.i(TAG, "VPN prepare result: ${if (prepareIntent != null) "NEED_PERMISSION" else "ALREADY_GRANTED"}")
         if (prepareIntent != null) {
             // Need user to grant VPN permission
-            Log.d(TAG, "Requesting VPN permission...")
+            RemoteLogger.d(TAG, "Requesting VPN permission...")
             vpnPermissionLauncher.launch(prepareIntent)
         } else {
             // Permission already granted, proceed
-            Log.i(TAG, "VPN permission already granted, calling doConnect()")
+            RemoteLogger.i(TAG, "VPN permission already granted, calling doConnect()")
             doConnect()
         }
     }
 
     private fun doConnect() {
-        Log.i(TAG, "🟡 doConnect() called")
+        RemoteLogger.i(TAG, "🟡 doConnect() called")
         viewLifecycleOwner.lifecycleScope.launch {
             try {
                 val app = requireActivity().application as TunnelyApp
                 val prefs = app.prefs
 
-                Log.i(TAG, "Server: ${prefs.serverAddress}:${prefs.serverPort}")
-                Log.i(TAG, "Server pubkey: ${prefs.serverPublicKey}")
-                Log.i(TAG, "Client pubkey: ${prefs.publicKey}")
-                Log.i(TAG, "Tunnel address: ${prefs.tunnelAddress}")
+                RemoteLogger.i(TAG, "Server: ${prefs.serverAddress}:${prefs.serverPort}")
+                RemoteLogger.i(TAG, "Server pubkey: ${prefs.serverPublicKey}")
+                RemoteLogger.i(TAG, "Client pubkey: ${prefs.publicKey}")
+                RemoteLogger.i(TAG, "Tunnel address: ${prefs.tunnelAddress}")
 
                 // Step 1: Auto-register peer with server (MANDATORY — gets correct server pubkey)
                 withContext(Dispatchers.Main) {
@@ -281,14 +281,14 @@ class ConnectFragment : Fragment() {
                     statusSubtext.text = "Registering peer with server"
                 }
                 try {
-                    Log.i(TAG, "Step 1: Auto-registering peer...")
+                    RemoteLogger.i(TAG, "Step 1: Auto-registering peer...")
                     val apiClient = ApiClient(prefs.serverAddress, prefs.serverPort)
                     val registration = apiClient.registerClient(prefs.publicKey)
                     prefs.serverPublicKey = registration.serverPublicKey
                     prefs.tunnelAddress = registration.tunnelAddress
-                    Log.i(TAG, "✅ Peer registered: ${registration.tunnelAddress}, server_key=${registration.serverPublicKey}")
+                    RemoteLogger.i(TAG, "✅ Peer registered: ${registration.tunnelAddress}, server_key=${registration.serverPublicKey}")
                 } catch (e: Exception) {
-                    Log.e(TAG, "❌ Auto-register FAILED — cannot connect without server pubkey: ${e.message}")
+                    RemoteLogger.e(TAG, "❌ Auto-register FAILED — cannot connect without server pubkey: ${e.message}")
                     withContext(Dispatchers.Main) {
                         statusText.text = "Registration Failed"
                         statusSubtext.text = "Cannot reach server: ${e.message}"
@@ -303,13 +303,13 @@ class ConnectFragment : Fragment() {
                     statusText.text = "Connecting..."
                     statusSubtext.text = "Establishing VPN tunnel"
                 }
-                Log.i(TAG, "Step 2: Calling TunnelyVpnService.connect()...")
+                RemoteLogger.i(TAG, "Step 2: Calling TunnelyVpnService.connect()...")
                 TunnelyVpnService.connect(requireContext(), prefs)
                 connectStartTime = System.currentTimeMillis()
-                Log.i(TAG, "✅ TunnelyVpnService.connect() called")
+                RemoteLogger.i(TAG, "✅ TunnelyVpnService.connect() called")
 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Connect failed", e)
+                RemoteLogger.e(TAG, "❌ Connect failed", e)
                 withContext(Dispatchers.Main) {
                     statusText.text = "Error"
                     statusSubtext.text = e.message ?: "Connection failed"

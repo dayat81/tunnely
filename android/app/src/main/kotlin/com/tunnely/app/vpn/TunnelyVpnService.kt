@@ -13,6 +13,7 @@ import androidx.lifecycle.LifecycleService
 import com.tunnely.app.MainActivity
 import com.tunnely.app.R
 import com.tunnely.app.api.ApiClient
+import com.tunnely.app.vpn.RemoteLogger
 import com.wireguard.android.backend.GoBackend
 import com.wireguard.android.backend.Tunnel
 import com.wireguard.config.Config
@@ -93,24 +94,24 @@ class TunnelyVpnService : LifecycleService() {
         val tunnel = object : Tunnel {
             override fun getName(): String = TUNNEL_NAME
             override fun onStateChange(newState: Tunnel.State) {
-                Log.d(TAG, "Tunnel state changed: $newState")
+                RemoteLogger.d(TAG, "Tunnel state changed: $newState")
             }
         }
 
         fun connect(context: Context, prefs: VpnPreferences) {
-            Log.i(TAG, "🟣 TunnelyVpnService.connect() called")
-            Log.i(TAG, "  serverAddress=${prefs.serverAddress}")
-            Log.i(TAG, "  serverPort=${prefs.serverPort}")
-            Log.i(TAG, "  serverPubKey=${prefs.serverPublicKey}")
-            Log.i(TAG, "  tunnelAddress=${prefs.tunnelAddress}")
-            Log.i(TAG, "  privateKey=${prefs.privateKey.take(8)}...")
-            Log.i(TAG, "  publicKey=${prefs.publicKey}")
+            RemoteLogger.i(TAG, "🟣 TunnelyVpnService.connect() called")
+            RemoteLogger.i(TAG, "  serverAddress=${prefs.serverAddress}")
+            RemoteLogger.i(TAG, "  serverPort=${prefs.serverPort}")
+            RemoteLogger.i(TAG, "  serverPubKey=${prefs.serverPublicKey}")
+            RemoteLogger.i(TAG, "  tunnelAddress=${prefs.tunnelAddress}")
+            RemoteLogger.i(TAG, "  privateKey=${prefs.privateKey.take(8)}...")
+            RemoteLogger.i(TAG, "  publicKey=${prefs.publicKey}")
             val intent = Intent(context, TunnelyVpnService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                Log.i(TAG, "  → startForegroundService()")
+                RemoteLogger.i(TAG, "  → startForegroundService()")
                 context.startForegroundService(intent)
             } else {
-                Log.i(TAG, "  → startService()")
+                RemoteLogger.i(TAG, "  → startService()")
                 context.startService(intent)
             }
 
@@ -120,7 +121,7 @@ class TunnelyVpnService : LifecycleService() {
                     delay(100)
                     attempts++
                 }
-                Log.i(TAG, "  Service instance ready after ${attempts * 100}ms, calling doConnect()")
+                RemoteLogger.i(TAG, "  Service instance ready after ${attempts * 100}ms, calling doConnect()")
                 serviceInstance?.doConnect(prefs)
             }
         }
@@ -138,16 +139,16 @@ class TunnelyVpnService : LifecycleService() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.i(TAG, "🟠 TunnelyVpnService.onCreate()")
+        RemoteLogger.i(TAG, "🟠 TunnelyVpnService.onCreate()")
         serviceInstance = this
         backend = GoBackend(this)
-        Log.i(TAG, "  GoBackend created, serviceInstance set")
+        RemoteLogger.i(TAG, "  GoBackend created, serviceInstance set")
         createNotificationChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
-        Log.i(TAG, "🟠 onStartCommand() action=${intent?.action}")
+        RemoteLogger.i(TAG, "🟠 onStartCommand() action=${intent?.action}")
         startForeground(NOTIFICATION_ID, createNotification("Disconnected"))
         return START_STICKY
     }
@@ -161,7 +162,7 @@ class TunnelyVpnService : LifecycleService() {
     }
 
     private fun doConnect(prefs: VpnPreferences) {
-        Log.i(TAG, "🔴 doConnect() started")
+        RemoteLogger.i(TAG, "🔴 doConnect() started")
         connectJob?.cancel()
         _vpnState.value = VpnState.CONNECTING
         _connectionHealth.value = ConnectionHealth()
@@ -173,62 +174,62 @@ class TunnelyVpnService : LifecycleService() {
                     val apiClient = ApiClient(prefs.serverAddress, prefs.serverPort)
                     val clientPubkey = prefs.publicKey
                     if (clientPubkey.isNotBlank()) {
-                        Log.i(TAG, "Step 1: Auto-registering peer: $clientPubkey")
+                        RemoteLogger.i(TAG, "Step 1: Auto-registering peer: $clientPubkey")
                         apiClient.registerClient(clientPubkey)
-                        Log.i(TAG, "Step 1: ✅ Auto-register done")
+                        RemoteLogger.i(TAG, "Step 1: ✅ Auto-register done")
                     } else {
-                        Log.w(TAG, "Step 1: ⚠️ Public key is blank!")
+                        RemoteLogger.w(TAG, "Step 1: ⚠️ Public key is blank!")
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Step 1: ⚠️ Auto-register failed (non-fatal): ${e.message}")
+                    RemoteLogger.w(TAG, "Step 1: ⚠️ Auto-register failed (non-fatal): ${e.message}")
                 }
 
                 // Step 2: Probe MTU
                 try {
                     if (prefs.autoMtu) {
-                        Log.i(TAG, "Step 2: Probing MTU...")
+                        RemoteLogger.i(TAG, "Step 2: Probing MTU...")
                         val mtu = MtuProber.discover(prefs.serverAddress)
                         if (mtu > 0) {
                             prefs.mtu = mtu
-                            Log.i(TAG, "Step 2: ✅ MTU probed: $mtu")
+                            RemoteLogger.i(TAG, "Step 2: ✅ MTU probed: $mtu")
                         } else {
-                            Log.w(TAG, "Step 2: ⚠️ MTU probe returned 0, using default ${prefs.mtu}")
+                            RemoteLogger.w(TAG, "Step 2: ⚠️ MTU probe returned 0, using default ${prefs.mtu}")
                         }
                     } else {
-                        Log.i(TAG, "Step 2: Auto-MTU disabled, using ${prefs.mtu}")
+                        RemoteLogger.i(TAG, "Step 2: Auto-MTU disabled, using ${prefs.mtu}")
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Step 2: ⚠️ MTU probe failed (non-fatal): ${e.message}")
+                    RemoteLogger.w(TAG, "Step 2: ⚠️ MTU probe failed (non-fatal): ${e.message}")
                 }
 
                 // Step 3: Resolve endpoint hostname BEFORE building config
-                Log.i(TAG, "Step 3: Resolving endpoint: ${prefs.serverAddress}:${prefs.serverPort}")
+                RemoteLogger.i(TAG, "Step 3: Resolving endpoint: ${prefs.serverAddress}:${prefs.serverPort}")
                 val resolvedEndpoint = resolveEndpoint(prefs.serverAddress, prefs.serverPort)
-                Log.i(TAG, "Step 3: ✅ Endpoint resolved: $resolvedEndpoint")
+                RemoteLogger.i(TAG, "Step 3: ✅ Endpoint resolved: $resolvedEndpoint")
 
                 // Step 4: Build WireGuard Config using proper API
-                Log.i(TAG, "Step 4: Building WireGuard config...")
-                Log.i(TAG, "  privateKey=${prefs.decodePrivateKeyBase64().take(8)}...")
-                Log.i(TAG, "  serverPubKey=${prefs.decodeServerPublicKeyBase64()}")
-                Log.i(TAG, "  tunnelAddress=${prefs.tunnelAddress}")
-                Log.i(TAG, "  mtu=${prefs.mtu}")
-                Log.i(TAG, "  dnsServers=${prefs.dnsServers}")
-                Log.i(TAG, "  allowedIps=${prefs.allowedIps}")
-                Log.i(TAG, "  endpoint=$resolvedEndpoint")
+                RemoteLogger.i(TAG, "Step 4: Building WireGuard config...")
+                RemoteLogger.i(TAG, "  privateKey=${prefs.decodePrivateKeyBase64().take(8)}...")
+                RemoteLogger.i(TAG, "  serverPubKey=${prefs.decodeServerPublicKeyBase64()}")
+                RemoteLogger.i(TAG, "  tunnelAddress=${prefs.tunnelAddress}")
+                RemoteLogger.i(TAG, "  mtu=${prefs.mtu}")
+                RemoteLogger.i(TAG, "  dnsServers=${prefs.dnsServers}")
+                RemoteLogger.i(TAG, "  allowedIps=${prefs.allowedIps}")
+                RemoteLogger.i(TAG, "  endpoint=$resolvedEndpoint")
                 val config = buildWireGuardConfig(prefs, resolvedEndpoint)
                 if (config == null) {
-                    Log.e(TAG, "Step 4: ❌ buildWireGuardConfig returned null!")
+                    RemoteLogger.e(TAG, "Step 4: ❌ buildWireGuardConfig returned null!")
                     throw Exception("Failed to build WireGuard config")
                 }
-                Log.i(TAG, "Step 4: ✅ Config built successfully")
+                RemoteLogger.i(TAG, "Step 4: ✅ Config built successfully")
 
                 // Step 5: Connect via GoBackend.setState()
-                Log.i(TAG, "Step 5: Calling GoBackend.setState(UP)...")
+                RemoteLogger.i(TAG, "Step 5: Calling GoBackend.setState(UP)...")
                 val currentBackend = backend ?: GoBackend(this@TunnelyVpnService)
                 currentBackend.setState(tunnel, Tunnel.State.UP, config)
                 backend = currentBackend
 
-                Log.i(TAG, "Step 5: ✅ GoBackend.setState(UP) succeeded — VPN connected!")
+                RemoteLogger.i(TAG, "Step 5: ✅ GoBackend.setState(UP) succeeded — VPN connected!")
 
                 // Step 6: Update state
                 _vpnState.value = VpnState.CONNECTED
@@ -249,7 +250,7 @@ class TunnelyVpnService : LifecycleService() {
                         // Check tunnel still up
                         val state = currentBackend.getState(tunnel)
                         if (state == Tunnel.State.DOWN) {
-                            Log.w(TAG, "Tunnel went DOWN")
+                            RemoteLogger.w(TAG, "Tunnel went DOWN")
                             _vpnState.value = VpnState.DISCONNECTED
                             break
                         }
@@ -278,14 +279,14 @@ class TunnelyVpnService : LifecycleService() {
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
-                        Log.w(TAG, "Monitor loop error: ${e.message}")
+                        RemoteLogger.w(TAG, "Monitor loop error: ${e.message}")
                     }
                 }
 
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.e(TAG, "Connect failed", e)
+                RemoteLogger.e(TAG, "Connect failed", e)
                 _vpnState.value = VpnState.ERROR
                 _connectionHealth.value = ConnectionHealth(error = e.message ?: "Unknown error")
                 updateNotification("Error: ${e.message}")
@@ -323,14 +324,14 @@ class TunnelyVpnService : LifecycleService() {
 
     private fun buildWireGuardConfig(prefs: VpnPreferences, resolvedEndpoint: String): Config? {
         return try {
-            Log.i(TAG, "buildWireGuardConfig: Building interface...")
+            RemoteLogger.i(TAG, "buildWireGuardConfig: Building interface...")
             // Build Interface
             val ifaceBuilder = com.wireguard.config.Interface.Builder()
                 .parsePrivateKey(prefs.decodePrivateKeyBase64())
                 .parseAddresses(prefs.tunnelAddress)
                 .parseMtu(prefs.mtu.toString())
                 .parseDnsServers(prefs.dnsServers)
-            Log.i(TAG, "  Interface: addr=${prefs.tunnelAddress}, mtu=${prefs.mtu}, dns=${prefs.dnsServers}")
+            RemoteLogger.i(TAG, "  Interface: addr=${prefs.tunnelAddress}, mtu=${prefs.mtu}, dns=${prefs.dnsServers}")
 
             // Split tunneling: include only selected apps
             if (prefs.splitTunneling && prefs.splitApps.isNotEmpty()) {
@@ -338,22 +339,22 @@ class TunnelyVpnService : LifecycleService() {
                     try {
                         ifaceBuilder.includeApplication(packageName)
                     } catch (e: Exception) {
-                        Log.w(TAG, "Failed to include $packageName: ${e.message}")
+                        RemoteLogger.w(TAG, "Failed to include $packageName: ${e.message}")
                     }
                 }
-                Log.i(TAG, "  Split tunneling: ${prefs.splitApps.size} apps")
+                RemoteLogger.i(TAG, "  Split tunneling: ${prefs.splitApps.size} apps")
             }
 
             val iface = ifaceBuilder.build()
-            Log.i(TAG, "  Interface built OK")
+            RemoteLogger.i(TAG, "  Interface built OK")
 
             // Build Peer
-            Log.i(TAG, "buildWireGuardConfig: Building peer...")
+            RemoteLogger.i(TAG, "buildWireGuardConfig: Building peer...")
             val peerBuilder = com.wireguard.config.Peer.Builder()
                 .parsePublicKey(prefs.decodeServerPublicKeyBase64())
                 .parseEndpoint(resolvedEndpoint)
                 .parsePersistentKeepalive("25")
-            Log.i(TAG, "  Peer: pubkey=${prefs.decodeServerPublicKeyBase64()}, endpoint=$resolvedEndpoint, keepalive=25")
+            RemoteLogger.i(TAG, "  Peer: pubkey=${prefs.decodeServerPublicKeyBase64()}, endpoint=$resolvedEndpoint, keepalive=25")
 
             // Add allowed IPs
             val allowedIpList = prefs.allowedIps.split(",")
@@ -361,20 +362,20 @@ class TunnelyVpnService : LifecycleService() {
                 .filter { it.isNotBlank() }
                 .map { InetNetwork.parse(it) }
             peerBuilder.addAllowedIps(allowedIpList)
-            Log.i(TAG, "  AllowedIPs: ${prefs.allowedIps}")
+            RemoteLogger.i(TAG, "  AllowedIPs: ${prefs.allowedIps}")
 
             val peer = peerBuilder.build()
-            Log.i(TAG, "  Peer built OK")
+            RemoteLogger.i(TAG, "  Peer built OK")
 
             // Build Config
             val config = Config.Builder()
                 .setInterface(iface)
                 .addPeer(peer)
                 .build()
-            Log.i(TAG, "  ✅ Config built successfully")
+            RemoteLogger.i(TAG, "  ✅ Config built successfully")
             config
         } catch (e: Exception) {
-            Log.e(TAG, "❌ buildWireGuardConfig failed: ${e.message}", e)
+            RemoteLogger.e(TAG, "❌ buildWireGuardConfig failed: ${e.message}", e)
             null
         }
     }
@@ -392,11 +393,11 @@ class TunnelyVpnService : LifecycleService() {
                 if (!isIpAddress(ip)) {
                     throw Exception("DNS resolution returned non-IP value '$ip' for '$host'")
                 }
-                Log.d(TAG, "Resolved endpoint: $host -> $ip:$port (attempt $attempt)")
+                RemoteLogger.d(TAG, "Resolved endpoint: $host -> $ip:$port (attempt $attempt)")
                 return "$ip:$port"
             } catch (e: java.net.UnknownHostException) {
                 lastException = e
-                Log.w(TAG, "Endpoint resolution error for '$host' (attempt $attempt/$maxRetries): ${e.message}")
+                RemoteLogger.w(TAG, "Endpoint resolution error for '$host' (attempt $attempt/$maxRetries): ${e.message}")
                 if (attempt < maxRetries) {
                     delay(500L * attempt)
                 }

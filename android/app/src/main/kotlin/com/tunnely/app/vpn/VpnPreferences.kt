@@ -72,6 +72,10 @@ class VpnPreferences(context: Context) {
         get() = prefs.getStringSet("split_apps", emptySet()) ?: emptySet()
         set(value) = prefs.edit().putStringSet("split_apps", value).apply()
 
+    var remoteLogging: Boolean
+        get() = prefs.getBoolean("remote_logging", false)
+        set(value) = prefs.edit().putBoolean("remote_logging", value).apply()
+
     fun regenerateKeys(): String {
         val kp = Curve25519.generateKeyPair()
         prefs.edit()

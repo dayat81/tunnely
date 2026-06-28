@@ -8,10 +8,19 @@ import json
 import os
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 
 WG_INTERFACE = "wg0"
 LISTEN_PORT = 8870
 DASHBOARD_HTML = os.path.join(os.path.dirname(__file__), "wg_dashboard.html")
+LOG_DIR = "/var/log/tunnely"
+LOG_FILE = os.path.join(LOG_DIR, "device_logs.jsonl")
+
+# Ensure log dir exists
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# Lock for thread-safe log writes
+_log_lock = threading.Lock()
 
 
 def parse_wg_dump():
@@ -128,6 +137,70 @@ def get_stats():
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # suppress logs
+
+    def _cors_headers(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._cors_headers()
+        self.end_headers()
+
+    def do_POST(self):
+        if self.path == "/api/vpn/logs":
+            try:
+                content_length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_length).decode("utf-8")
+                data = json.loads(body)
+
+                # Extract metadata
+                device_id = data.get("device_id", "unknown")
+                device_model = data.get("device_model", "unknown")
+                app_version = data.get("app_version", "unknown")
+                tunnel_ip = data.get("tunnel_ip", "")
+                public_key = data.get("public_key", "")[:16] + "…" if data.get("public_key") else ""
+                logs = data.get("logs", [])
+
+                # Write each log entry to JSONL file
+                with _log_lock:
+                    with open(LOG_FILE, "a") as f:
+                        for entry in logs:
+                            record = {
+                                "ts": entry.get("ts", ""),
+                                "level": entry.get("level", ""),
+                                "tag": entry.get("tag", ""),
+                                "msg": entry.get("msg", ""),
+                                "device_id": device_id,
+                                "device_model": device_model,
+                                "app_version": app_version,
+                                "tunnel_ip": tunnel_ip,
+                                "public_key": public_key,
+                            }
+                            if entry.get("stack"):
+                                record["stack"] = entry["stack"]
+                            f.write(json.dumps(record) + "\n")
+
+                print(f"[logs] Received {len(logs)} entries from {device_model} ({tunnel_ip})")
+
+                resp = {"status": "ok", "received": len(logs)}
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps(resp).encode())
+
+            except Exception as e:
+                print(f"[logs] Error: {e}")
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
 
     def do_GET(self):
         if self.path == "/api/wg/status":

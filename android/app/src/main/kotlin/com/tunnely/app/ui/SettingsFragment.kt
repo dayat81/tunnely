@@ -15,6 +15,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.button.MaterialButton
 import com.tunnely.app.R
 import com.tunnely.app.TunnelyApp
+import com.tunnely.app.vpn.RemoteLogger
 import com.tunnely.app.vpn.VpnPreferences
 
 class SettingsFragment : Fragment() {
@@ -28,6 +29,8 @@ class SettingsFragment : Fragment() {
     private lateinit var editAllowedIps: EditText
     private lateinit var btnSave: MaterialButton
     private lateinit var btnPickApps: MaterialButton
+    private lateinit var switchRemoteLogging: Switch
+    private lateinit var textLogStatus: android.widget.TextView
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -55,6 +58,8 @@ class SettingsFragment : Fragment() {
         editAllowedIps = view.findViewById(R.id.edit_allowed_ips)
         btnSave = view.findViewById(R.id.btn_save)
         btnPickApps = view.findViewById(R.id.btn_pick_apps)
+        switchRemoteLogging = view.findViewById(R.id.switch_remote_logging)
+        textLogStatus = view.findViewById(R.id.text_log_status)
     }
 
     private fun loadSettings() {
@@ -75,6 +80,10 @@ class SettingsFragment : Fragment() {
         // App picker should be disabled when split tunneling is off
         btnPickApps.isEnabled = prefs.splitTunneling
         updatePickAppsButtonText(prefs)
+
+        // Remote logging
+        switchRemoteLogging.isChecked = prefs.remoteLogging
+        updateLogStatusText(prefs.remoteLogging)
     }
 
     private fun setupListeners() {
@@ -84,6 +93,16 @@ class SettingsFragment : Fragment() {
 
         switchSplitTunneling.setOnCheckedChangeListener { _, isChecked ->
             btnPickApps.isEnabled = isChecked
+        }
+
+        switchRemoteLogging.setOnCheckedChangeListener { _, isChecked ->
+            RemoteLogger.setEnabled(isChecked)
+            updateLogStatusText(isChecked)
+            Toast.makeText(requireContext(),
+                if (isChecked) "Remote logging ON — logs pushed to server every 10s"
+                else "Remote logging OFF",
+                Toast.LENGTH_SHORT
+            ).show()
         }
 
         btnSave.setOnClickListener {
@@ -101,6 +120,14 @@ class SettingsFragment : Fragment() {
             "Select Apps ($count selected)"
         } else {
             "Select Apps"
+        }
+    }
+
+    private fun updateLogStatusText(enabled: Boolean) {
+        textLogStatus.text = if (enabled) {
+            "Status: ✅ Active — pushing to https://${(requireActivity().application as TunnelyApp).prefs.serverAddress}/api/vpn/logs"
+        } else {
+            "Status: Disabled"
         }
     }
 

@@ -1,6 +1,7 @@
 package com.tunnely.app
 
 import android.app.Application
+import com.tunnely.app.vpn.RemoteLogger
 import com.tunnely.app.vpn.VpnPreferences
 
 class TunnelyApp : Application() {
@@ -10,5 +11,6 @@ class TunnelyApp : Application() {
     override fun onCreate() {
         super.onCreate()
         prefs = VpnPreferences(this)
+        RemoteLogger.init(this)
     }
 }
