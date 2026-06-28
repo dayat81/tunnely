@@ -26,15 +26,21 @@
             </intent-filter>
         </activity>
 
+        <!-- GoBackend$VpnService: the actual VPN service managed by GoBackend -->
         <service
-            android:name=".vpn.TunnelyVpnService"
+            android:name="com.wireguard.android.backend.GoBackend$VpnService"
             android:exported="false"
-            android:foregroundServiceType="specialUse"
             android:permission="android.permission.BIND_VPN_SERVICE">
             <intent-filter>
                 <action android:name="android.net.VpnService" />
             </intent-filter>
         </service>
+
+        <!-- TunnelyVpnService: foreground service managing VPN lifecycle via GoBackend -->
+        <service
+            android:name=".vpn.TunnelyVpnService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse" />
 
     </application>
 </manifest>

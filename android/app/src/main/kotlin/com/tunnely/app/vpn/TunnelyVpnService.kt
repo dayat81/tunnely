@@ -6,23 +6,27 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.content.pm.ServiceInfo
-import android.net.VpnService
-import android.os.Binder
 import android.os.Build
-import android.os.IBinder
-import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.lifecycle.LifecycleService
 import com.tunnely.app.MainActivity
 import com.tunnely.app.R
+import com.tunnely.app.api.ApiClient
+import com.wireguard.android.backend.GoBackend
+import com.wireguard.android.backend.Tunnel
+import com.wireguard.config.Config
+import com.wireguard.config.InetNetwork
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import java.net.InetAddress
 
 enum class VpnState {
@@ -33,14 +37,13 @@ enum class VpnState {
     ERROR
 }
 
-/** Connection health — tracks WireGuard handshake status */
 data class ConnectionHealth(
-    val handshakeAge: Long = -1,       // seconds since last handshake (-1 = never)
-    val lastHandshakeEpoch: Long = 0,  // epoch seconds of last handshake
-    val endpoint: String = "",         // resolved endpoint
-    val transferRx: Long = 0,          // bytes received via WireGuard
-    val transferTx: Long = 0,          // bytes sent via WireGuard
-    val error: String = ""             // error message if any
+    val handshakeAge: Long = -1,
+    val lastHandshakeEpoch: Long = 0,
+    val endpoint: String = "",
+    val transferRx: Long = 0,
+    val transferTx: Long = 0,
+    val error: String = ""
 ) {
     val isHandshakeOk: Boolean get() = handshakeAge in 0..300
     val statusText: String get() = when {
@@ -56,14 +59,19 @@ data class TrafficStats(
     val txBytes: Long = 0
 )
 
-class TunnelyVpnService : VpnService() {
+/**
+ * VPN service using GoBackend.setState() — the proper WireGuard Android API.
+ * GoBackend handles TUN establishment, socket protect, and WireGuard lifecycle.
+ * This avoids the routing loop issue (Issue #7) that plagued direct wgTurnOn.
+ */
+class TunnelyVpnService : LifecycleService() {
 
     companion object {
         private const val TAG = "TunnelyVpn"
-        const val TUNNEL_NAME = "tunnely-vpn"
-        const val NOTIFICATION_CHANNEL_ID = "tunnely_vpn"
-        const val NOTIFICATION_ID = 1
-        private const val HANDSHAKE_TIMEOUT_MS = 20000L  // 20s to wait for handshake
+        private const val TUNNEL_NAME = "tunnely-vpn"
+        private const val NOTIFICATION_CHANNEL_ID = "tunnely_vpn"
+        private const val NOTIFICATION_ID = 1
+        private const val HANDSHAKE_CHECK_INTERVAL = 3000L
 
         private val _vpnState = MutableStateFlow(VpnState.DISCONNECTED)
         val vpnState: StateFlow<VpnState> = _vpnState.asStateFlow()
@@ -75,76 +83,17 @@ class TunnelyVpnService : VpnService() {
         val connectionHealth: StateFlow<ConnectionHealth> = _connectionHealth.asStateFlow()
 
         private var serviceInstance: TunnelyVpnService? = null
-        private var tunnelHandle: Int = -1
-        private var tunFd: ParcelFileDescriptor? = null
+        private var backend: GoBackend? = null
 
-        // Traffic baseline (recorded when VPN connects)
+        // Traffic baseline
         private var baselineRx: Long = -1
         private var baselineTx: Long = -1
 
-        // WireGuard native functions via reflection
-        private var wgTurnOnMethod: java.lang.reflect.Method? = null
-        private var wgTurnOffMethod: java.lang.reflect.Method? = null
-        private var wgGetSocketV4Method: java.lang.reflect.Method? = null
-        private var wgGetSocketV6Method: java.lang.reflect.Method? = null
-        private var wgGetBytesMethod: java.lang.reflect.Method? = null
-        private var wgGetConfigMethod: java.lang.reflect.Method? = null
-        private var goBackendVpnServiceField: java.lang.reflect.Field? = null
-
-        init {
-            try {
-                System.loadLibrary("wg-go")
-                Log.d(TAG, "Loaded libwg-go.so")
-            } catch (e: UnsatisfiedLinkError) {
-                try {
-                    System.loadLibrary("wg")
-                    Log.d(TAG, "Loaded libwg.so")
-                } catch (e2: UnsatisfiedLinkError) {
-                    Log.e(TAG, "Failed to load WireGuard native library", e2)
-                }
-            }
-
-            try {
-                val goBackendClass = Class.forName("com.wireguard.android.backend.GoBackend")
-                wgTurnOnMethod = goBackendClass.getDeclaredMethod(
-                    "wgTurnOn", String::class.java, Int::class.javaPrimitiveType, String::class.java
-                ).apply { isAccessible = true }
-                wgTurnOffMethod = goBackendClass.getDeclaredMethod(
-                    "wgTurnOff", Int::class.javaPrimitiveType
-                ).apply { isAccessible = true }
-                wgGetSocketV4Method = goBackendClass.getDeclaredMethod(
-                    "wgGetSocketV4", Int::class.javaPrimitiveType
-                ).apply { isAccessible = true }
-                wgGetSocketV6Method = goBackendClass.getDeclaredMethod(
-                    "wgGetSocketV6", Int::class.javaPrimitiveType
-                ).apply { isAccessible = true }
-                try {
-                    wgGetBytesMethod = goBackendClass.getDeclaredMethod(
-                        "wgGetBytes", Int::class.javaPrimitiveType
-                    ).apply { isAccessible = true }
-                } catch (_: Exception) {}
-                try {
-                    wgGetConfigMethod = goBackendClass.getDeclaredMethod(
-                        "wgGetConfig", String::class.java
-                    ).apply { isAccessible = true }
-                } catch (_: Exception) {
-                    Log.w(TAG, "wgGetConfig not available — handshake check disabled")
-                }
-
-                // CRITICAL: Access GoBackend.vpnService CompletableFuture
-                // WireGuard Go code uses this to call protect() on its UDP sockets
-                // Without this, WireGuard handshake packets get routed through TUN (loop!)
-                try {
-                    goBackendVpnServiceField = goBackendClass.getDeclaredField("vpnService")
-                    goBackendVpnServiceField?.isAccessible = true
-                    Log.d(TAG, "GoBackend.vpnService field accessible — socket protect will work")
-                } catch (_: Exception) {
-                    Log.w(TAG, "GoBackend.vpnService field not accessible — manual protect only")
-                }
-
-                Log.d(TAG, "GoBackend native methods accessible via reflection")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to access GoBackend methods", e)
+        // WireGuard Tunnel object
+        val tunnel = object : Tunnel {
+            override fun getName(): String = TUNNEL_NAME
+            override fun onStateChange(newState: Tunnel.State) {
+                Log.d(TAG, "Tunnel state changed: $newState")
             }
         }
 
@@ -162,268 +111,113 @@ class TunnelyVpnService : VpnService() {
                     delay(100)
                     attempts++
                 }
-                serviceInstance?.connect(prefs)
+                serviceInstance?.doConnect(prefs)
             }
         }
 
         fun disconnect(context: Context, prefs: VpnPreferences) {
             GlobalScope.launch(Dispatchers.IO) {
-                serviceInstance?.disconnect(prefs)
+                serviceInstance?.doDisconnect()
             }
         }
     }
 
-    inner class LocalBinder : Binder() {
-        fun getService(): TunnelyVpnService = this@TunnelyVpnService
-    }
-
-    private val binder = LocalBinder()
-
-    override fun onBind(intent: Intent?): IBinder = binder
+    private val supervisorJob = SupervisorJob()
+    private val serviceScope = kotlinx.coroutines.CoroutineScope(supervisorJob + Dispatchers.IO)
+    private var connectJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
         serviceInstance = this
+        backend = GoBackend(this)
         createNotificationChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(
-                NOTIFICATION_ID,
-                createNotification("Disconnected"),
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, createNotification("Disconnected"))
-        }
+        super.onStartCommand(intent, flags, startId)
+        startForeground(NOTIFICATION_ID, createNotification("Disconnected"))
         return START_STICKY
     }
 
     override fun onDestroy() {
-        super.onDestroy()
-        try {
-            if (tunnelHandle >= 0) {
-                wgTurnOffMethod?.invoke(null, tunnelHandle)
-                tunnelHandle = -1
-            }
-            tunFd?.close()
-            tunFd = null
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in onDestroy", e)
-        }
+        connectJob?.cancel()
+        supervisorJob.cancel()
+        backend = null
         serviceInstance = null
+        super.onDestroy()
     }
 
-    private fun createNotificationChannel() {
-        val channel = NotificationChannel(
-            NOTIFICATION_CHANNEL_ID,
-            "Tunnely VPN",
-            NotificationManager.IMPORTANCE_LOW
-        ).apply {
-            description = "Tunnely VPN connection status"
-        }
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(channel)
-    }
+    private fun doConnect(prefs: VpnPreferences) {
+        connectJob?.cancel()
+        _vpnState.value = VpnState.CONNECTING
+        _connectionHealth.value = ConnectionHealth()
 
-    private fun createNotification(status: String): Notification {
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE
-        )
-        return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("Tunnely")
-            .setContentText(status)
-            .setSmallIcon(R.drawable.ic_vpn_key)
-            .setContentIntent(pendingIntent)
-            .setOngoing(true)
-            .build()
-    }
-
-    suspend fun connect(prefs: VpnPreferences) {
-        try {
-            _vpnState.value = VpnState.CONNECTING
-            _connectionHealth.value = ConnectionHealth()
-
-            // CRITICAL: Resolve hostname BEFORE establishing TUN.
-            val resolvedEndpoint = resolveEndpoint(prefs.serverAddress, prefs.serverPort)
-            Log.d(TAG, "Endpoint resolved: ${prefs.serverAddress} -> $resolvedEndpoint")
-
-            // Build VPN tunnel
-            val builder = Builder()
-                .setSession(TUNNEL_NAME)
-                .setMtu(prefs.mtu)
-
-            // Addresses
-            for (addr in prefs.tunnelAddress.split(",").map { it.trim() }) {
-                if (addr.isNotBlank()) {
-                    val parts = addr.split("/")
-                    if (parts.size == 2) {
-                        builder.addAddress(parts[0], parts[1].toInt())
-                    }
-                }
-            }
-
-            // DNS
-            for (dns in prefs.dnsServers.split(",").map { it.trim() }) {
-                if (dns.isNotBlank()) {
-                    for (resolved in InetAddress.getAllByName(dns)) {
-                        builder.addDnsServer(resolved)
-                    }
-                }
-            }
-
-            // Routes
-            for (route in prefs.allowedIps.split(",").map { it.trim() }) {
-                if (route.isNotBlank()) {
-                    val parts = route.split("/")
-                    if (parts.size == 2) {
-                        builder.addRoute(parts[0], parts[1].toInt())
-                    }
-                }
-            }
-
-            // Split tunneling
-            if (prefs.splitTunneling && prefs.splitApps.isNotEmpty()) {
-                for (packageName in prefs.splitApps) {
-                    try {
-                        builder.addAllowedApplication(packageName)
-                        Log.d(TAG, "Split tunnel: added $packageName")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Failed to add $packageName to split tunnel", e)
-                    }
-                }
-                Log.i(TAG, "Split tunneling enabled for ${prefs.splitApps.size} apps")
-            } else {
-                Log.i(TAG, "Split tunneling disabled — all traffic through VPN")
-            }
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
-                builder.setMetered(false)
-
-            // CRITICAL: Tell Android which network to use for VPN's outbound traffic.
-            // Without this, WireGuard's UDP handshake packets get routed through TUN → loop.
-            // setUnderlyingNetworks ensures WireGuard UDP goes through the physical network.
+        connectJob = serviceScope.launch {
             try {
-                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-                val activeNetwork = cm.activeNetwork
-                if (activeNetwork != null) {
-                    builder.setUnderlyingNetworks(arrayOf(activeNetwork))
-                    Log.i(TAG, "setUnderlyingNetworks: ${activeNetwork} — WireGuard UDP will bypass TUN")
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "setUnderlyingNetworks failed: ${e.message}")
-            }
-
-            builder.setBlocking(true)
-
-            val fd = builder.establish()
-                ?: throw Exception("Failed to establish TUN - VPN permission not granted?")
-            tunFd = fd
-
-            // Build WireGuard UAPI config
-            val privateKeyBytes = prefs.decodePrivateKey()
-            val privateKeyHex = bytesToHex(privateKeyBytes)
-            val serverKeyBytes = prefs.decodeServerPublicKey()
-            val serverKeyHex = bytesToHex(serverKeyBytes)
-
-            val wgConfig = buildString {
-                append("private_key=$privateKeyHex\n")
-                append("replace_peers=true\n")
-                append("public_key=$serverKeyHex\n")
-                append("endpoint=$resolvedEndpoint\n")
-                append("persistent_keepalive_interval=25\n")
-                append("replace_allowed_ips=true\n")
-                for (ip in prefs.allowedIps.split(",").map { it.trim() }) {
-                    if (ip.isNotBlank()) {
-                        append("allowed_ip=$ip\n")
+                // Step 1: Auto-register peer on server
+                try {
+                    val apiClient = ApiClient(prefs.serverAddress, prefs.serverPort)
+                    val clientPubkey = prefs.publicKey
+                    if (clientPubkey.isNotBlank()) {
+                        Log.d(TAG, "Auto-registering peer: $clientPubkey")
+                        apiClient.registerClient(clientPubkey)
                     }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Auto-register failed (non-fatal): ${e.message}")
                 }
-            }
 
-            Log.d(TAG, "Starting WireGuard tunnel...")
-            Log.d(TAG, "Config (no keys): replace_peers=true, endpoint=${prefs.serverAddress}:${prefs.serverPort}")
-
-            // CRITICAL: Set GoBackend.vpnService so WireGuard Go code can call protect()
-            // on its UDP sockets BEFORE sending handshake packets.
-            // Without this, handshake packets get routed through TUN → loop → never connects.
-            try {
-                val futureClass = Class.forName("java.util.concurrent.CompletableFuture")
-                val completedFutureMethod = futureClass.getMethod("completedFuture", Any::class.java)
-                val future = completedFutureMethod.invoke(null, this@TunnelyVpnService)
-                goBackendVpnServiceField?.set(null, future)
-                Log.i(TAG, "GoBackend.vpnService set — WireGuard socket protect enabled")
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to set GoBackend.vpnService: ${e.message} — manual protect only")
-            }
-
-            val handle = wgTurnOnMethod?.invoke(null, TUNNEL_NAME, fd.detachFd(), wgConfig) as? Int
-                ?: throw Exception("wgTurnOn returned null")
-
-            if (handle < 0) {
-                throw Exception("wgTurnOn failed with code: $handle")
-            }
-
-            tunnelHandle = handle
-            Log.d(TAG, "WireGuard tunnel started, handle: $tunnelHandle")
-
-            // Protect WireGuard sockets to bypass VPN routing
-            // This is a SECOND defense after setUnderlyingNetworks
-            try {
-                val sock4 = wgGetSocketV4Method?.invoke(null, tunnelHandle) as? Int ?: -1
-                val sock6 = wgGetSocketV6Method?.invoke(null, tunnelHandle) as? Int ?: -1
-                Log.d(TAG, "WireGuard sockets: v4=$sock4, v6=$sock6")
-                if (sock4 >= 0) {
-                    val result = protect(sock4)
-                    Log.i(TAG, "protect(sock4=$sock4) = $result")
-                }
-                if (sock6 >= 0) {
-                    val result = protect(sock6)
-                    Log.i(TAG, "protect(sock6=$sock6) = $result")
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Socket protect failed", e)
-            }
-
-            _vpnState.value = VpnState.CONNECTED
-            _connectionHealth.value = ConnectionHealth(endpoint = resolvedEndpoint)
-            updateNotification("Connected — waiting for handshake...")
-
-            // Record baseline and start traffic stats polling
-            val uid = android.os.Process.myUid()
-            baselineRx = android.net.TrafficStats.getUidRxBytes(uid)
-            baselineTx = android.net.TrafficStats.getUidTxBytes(uid)
-            if (baselineRx < 0) baselineRx = 0
-            if (baselineTx < 0) baselineTx = 0
-
-            // Start handshake verification + traffic polling
-            GlobalScope.launch(Dispatchers.IO) {
-                val startTime = System.currentTimeMillis()
-                var handshakeVerified = false
-
-                while (_vpnState.value == VpnState.CONNECTED && tunnelHandle >= 0) {
-                    try {
-                        // Check handshake via wgGetConfig
-                        val health = checkConnectionHealth(resolvedEndpoint)
-                        _connectionHealth.value = health
-
-                        if (health.isHandshakeOk && !handshakeVerified) {
-                            handshakeVerified = true
-                            updateNotification("Connected ✓")
-                            Log.i(TAG, "WireGuard handshake verified! (${health.handshakeAge}s ago)")
+                // Step 2: Probe MTU
+                try {
+                    if (prefs.autoMtu) {
+                        val mtu = MtuProber.discover(prefs.serverAddress)
+                        if (mtu > 0) {
+                            prefs.mtu = mtu
+                            Log.d(TAG, "MTU probed: $mtu")
                         }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "MTU probe failed (non-fatal): ${e.message}")
+                }
 
-                        // If handshake hasn't happened after timeout, log warning
-                        if (!handshakeVerified) {
-                            val elapsed = System.currentTimeMillis() - startTime
-                            if (elapsed > HANDSHAKE_TIMEOUT_MS) {
-                                Log.w(TAG, "Handshake not received after ${elapsed/1000}s — " +
-                                    "endpoint=$resolvedEndpoint may be unreachable")
-                                updateNotification("⚠️ No handshake — check network")
-                                // Don't disconnect — keep trying (could be slow network)
-                            }
+                // Step 3: Resolve endpoint hostname BEFORE building config
+                val resolvedEndpoint = resolveEndpoint(prefs.serverAddress, prefs.serverPort)
+                Log.d(TAG, "Endpoint resolved: ${prefs.serverAddress} -> $resolvedEndpoint")
+
+                // Step 4: Build WireGuard Config using proper API
+                val config = buildWireGuardConfig(prefs, resolvedEndpoint)
+                    ?: throw Exception("Failed to build WireGuard config")
+
+                // Step 5: Connect via GoBackend.setState()
+                // This handles: TUN establish, socket protect, wgTurnOn — all internally
+                Log.d(TAG, "Connecting via GoBackend.setState(UP)...")
+                val currentBackend = backend ?: GoBackend(this@TunnelyVpnService)
+                currentBackend.setState(tunnel, Tunnel.State.UP, config)
+                backend = currentBackend
+
+                Log.i(TAG, "GoBackend.setState(UP) succeeded — VPN connected!")
+
+                // Step 6: Update state
+                _vpnState.value = VpnState.CONNECTED
+                _connectionHealth.value = ConnectionHealth(endpoint = resolvedEndpoint)
+                updateNotification("Connected ✓")
+
+                // Step 7: Record traffic baseline
+                val uid = android.os.Process.myUid()
+                baselineRx = android.net.TrafficStats.getUidRxBytes(uid)
+                baselineTx = android.net.TrafficStats.getUidTxBytes(uid)
+                if (baselineRx < 0) baselineRx = 0
+                if (baselineTx < 0) baselineTx = 0
+
+                // Step 8: Start monitoring loop
+                while (true) {
+                    delay(HANDSHAKE_CHECK_INTERVAL)
+                    try {
+                        // Check tunnel still up
+                        val state = currentBackend.getState(tunnel)
+                        if (state == Tunnel.State.DOWN) {
+                            Log.w(TAG, "Tunnel went DOWN")
+                            _vpnState.value = VpnState.DISCONNECTED
+                            break
                         }
 
                         // Update traffic stats
@@ -435,93 +229,112 @@ class TunnelyVpnService : VpnService() {
                                 txBytes = currentTx - baselineTx
                             )
                         }
+
+                        // Update connection health via GoBackend statistics
+                        try {
+                            val stats = currentBackend.getStatistics(tunnel)
+                            val totalRx = stats.totalRx()
+                            val totalTx = stats.totalTx()
+                            _connectionHealth.value = _connectionHealth.value.copy(
+                                transferRx = totalRx,
+                                transferTx = totalTx
+                            )
+                        } catch (_: Exception) {}
+
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
-                        Log.w(TAG, "Health check poll failed", e)
-                    }
-                    delay(2000)
-                }
-            }
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Connect failed", e)
-            _vpnState.value = VpnState.ERROR
-            _connectionHealth.value = ConnectionHealth(error = e.message ?: "Unknown error")
-            throw e
-        }
-    }
-
-    /**
-     * Check WireGuard handshake status via wgGetConfig reflection.
-     * Parses UAPI output for last_handshake_time, endpoint, rx/tx bytes.
-     */
-    private fun checkConnectionHealth(resolvedEndpoint: String): ConnectionHealth {
-        try {
-            val config = wgGetConfigMethod?.invoke(null, TUNNEL_NAME) as? String
-            if (config != null) {
-                var lastHandshake: Long = 0
-                var endpoint = ""
-                var rxBytes: Long = 0
-                var txBytes: Long = 0
-
-                for (line in config.lines()) {
-                    val trimmed = line.trim()
-                    when {
-                        trimmed.startsWith("last_handshake_time=") -> {
-                            lastHandshake = trimmed.substringAfter("=").toLongOrNull() ?: 0
-                        }
-                        trimmed.startsWith("endpoint=") -> {
-                            endpoint = trimmed.substringAfter("=")
-                        }
-                        trimmed.startsWith("rx_bytes=") -> {
-                            rxBytes = trimmed.substringAfter("=").toLongOrNull() ?: 0
-                        }
-                        trimmed.startsWith("tx_bytes=") -> {
-                            txBytes = trimmed.substringAfter("=").toLongOrNull() ?: 0
-                        }
+                        Log.w(TAG, "Monitor loop error: ${e.message}")
                     }
                 }
 
-                val now = System.currentTimeMillis() / 1000
-                val handshakeAge = if (lastHandshake > 0) now - lastHandshake else -1
-
-                return ConnectionHealth(
-                    handshakeAge = handshakeAge,
-                    lastHandshakeEpoch = lastHandshake,
-                    endpoint = endpoint.ifEmpty { resolvedEndpoint },
-                    transferRx = rxBytes,
-                    transferTx = txBytes
-                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Connect failed", e)
+                _vpnState.value = VpnState.ERROR
+                _connectionHealth.value = ConnectionHealth(error = e.message ?: "Unknown error")
+                updateNotification("Error: ${e.message}")
+                delay(3000)
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "wgGetConfig failed: ${e.message}")
         }
-
-        // Fallback: no wgGetConfig, return unknown health
-        return ConnectionHealth(endpoint = resolvedEndpoint)
     }
 
-    suspend fun disconnect(prefs: VpnPreferences) {
+    private fun doDisconnect() {
+        connectJob?.cancel()
+        connectJob = null
+        _vpnState.value = VpnState.DISCONNECTING
+
         try {
-            _vpnState.value = VpnState.DISCONNECTING
-            if (tunnelHandle >= 0) {
-                wgTurnOffMethod?.invoke(null, tunnelHandle)
-                tunnelHandle = -1
+            val currentBackend = backend
+            if (currentBackend != null) {
+                try {
+                    val state = currentBackend.getState(tunnel)
+                    if (state == Tunnel.State.UP) {
+                        currentBackend.setState(tunnel, Tunnel.State.DOWN, null)
+                    }
+                } catch (_: Exception) {}
             }
-            tunFd?.close()
-            tunFd = null
-        } catch (e: Exception) {
-            Log.e(TAG, "Disconnect error", e)
-        } finally {
-            _vpnState.value = VpnState.DISCONNECTED
-            _trafficStats.value = TrafficStats()
-            _connectionHealth.value = ConnectionHealth()
-            updateNotification("Disconnected")
-        }
+        } catch (_: Exception) {}
+
+        _vpnState.value = VpnState.DISCONNECTED
+        _trafficStats.value = TrafficStats()
+        _connectionHealth.value = ConnectionHealth()
+        updateNotification("Disconnected")
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
-    private fun updateNotification(status: String) {
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.notify(NOTIFICATION_ID, createNotification(status))
+    private fun buildWireGuardConfig(prefs: VpnPreferences, resolvedEndpoint: String): Config? {
+        return try {
+            // Build Interface
+            val ifaceBuilder = com.wireguard.config.Interface.Builder()
+                .parsePrivateKey(prefs.decodePrivateKeyBase64())
+                .parseAddresses(prefs.tunnelAddress)
+                .parseMtu(prefs.mtu.toString())
+                .parseDnsServers(prefs.dnsServers)
+
+            // Split tunneling: include only selected apps
+            if (prefs.splitTunneling && prefs.splitApps.isNotEmpty()) {
+                for (packageName in prefs.splitApps) {
+                    try {
+                        ifaceBuilder.includeApplication(packageName)
+                        Log.d(TAG, "Split tunnel: included $packageName")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to include $packageName: ${e.message}")
+                    }
+                }
+                Log.i(TAG, "Split tunneling: ${prefs.splitApps.size} apps")
+            }
+
+            val iface = ifaceBuilder.build()
+
+            // Build Peer
+            val peerBuilder = com.wireguard.config.Peer.Builder()
+                .parsePublicKey(prefs.decodeServerPublicKeyBase64())
+                .parseEndpoint(resolvedEndpoint)
+                .parsePersistentKeepalive("25")
+
+            // Add allowed IPs
+            val allowedIpList = prefs.allowedIps.split(",")
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .map { InetNetwork.parse(it) }
+            peerBuilder.addAllowedIps(allowedIpList)
+
+            val peer = peerBuilder.build()
+
+            // Build Config
+            Config.Builder()
+                .setInterface(iface)
+                .addPeer(peer)
+                .build()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to build config: ${e.message}", e)
+            null
+        }
     }
 
     private suspend fun resolveEndpoint(host: String, port: Int): String {
@@ -543,7 +356,7 @@ class TunnelyVpnService : VpnService() {
                 lastException = e
                 Log.w(TAG, "Endpoint resolution error for '$host' (attempt $attempt/$maxRetries): ${e.message}")
                 if (attempt < maxRetries) {
-                    Thread.sleep(500L * attempt)
+                    delay(500L * attempt)
                 }
             }
         }
@@ -554,7 +367,33 @@ class TunnelyVpnService : VpnService() {
         return host.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$")) || host.contains(":")
     }
 
-    private fun bytesToHex(bytes: ByteArray): String {
-        return bytes.joinToString("") { "%02x".format(it) }
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val channel = NotificationChannel(
+            NOTIFICATION_CHANNEL_ID,
+            "Tunnely VPN",
+            NotificationManager.IMPORTANCE_LOW
+        ).apply { description = "Tunnely VPN connection status" }
+        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+    }
+
+    private fun createNotification(status: String): Notification {
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE
+        )
+        return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setContentTitle("Tunnely")
+            .setContentText(status)
+            .setSmallIcon(R.drawable.ic_vpn_key)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .build()
+    }
+
+    private fun updateNotification(status: String) {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.notify(NOTIFICATION_ID, createNotification(status))
     }
 }

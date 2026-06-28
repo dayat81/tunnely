@@ -89,6 +89,12 @@ class VpnPreferences(context: Context) {
         return Base64.decode(serverPublicKey, Base64.NO_WRAP)
     }
 
+    /** Return private key as base64 string for Config.Builder.parsePrivateKey() */
+    fun decodePrivateKeyBase64(): String = privateKey
+
+    /** Return server public key as base64 string for Config.Builder.parsePublicKey() */
+    fun decodeServerPublicKeyBase64(): String = serverPublicKey
+
     companion object {
         const val DEFAULT_SERVER_PUBKEY = "LD7xNAw6Sn7Q0dIhJ211y24Il/oTeCXgGyEaOGIwZSE="
         const val DEFAULT_TUNNEL_ADDRESS = "10.10.0.45/32"
