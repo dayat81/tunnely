@@ -249,7 +249,6 @@ class TunnelyVpnService : VpnService() {
             val wgConfig = buildString {
                 append("private_key=$privateKeyHex\n")
                 append("listen_port=0\n")
-                append("mtu=${prefs.mtu}\n")
                 append("replace_peers=true\n")
                 append("public_key=$serverKeyHex\n")
                 append("endpoint=${prefs.serverAddress}:${prefs.serverPort}\n")
