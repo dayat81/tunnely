@@ -10,6 +10,7 @@ import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Binder
 import android.os.Build
+import android.util.Log
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.wireguard.android.backend.GoBackend
@@ -28,7 +29,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.lang.reflect.Field
 import java.net.InetAddress
+import java.util.concurrent.CompletableFuture
 
 enum class VpnState {
     DISCONNECTED,
@@ -100,6 +103,23 @@ class TunnelyVpnService : GoBackend.VpnService() {
         super.onCreate()
         serviceInstance = this
         createNotificationChannel()
+        
+        // Pre-complete GoBackend's vpnService CompletableFuture so it uses OUR service
+        // instead of starting its own GoBackend.VpnService
+        try {
+            val goBackendClass = GoBackend::class.java
+            val vpnServiceField = goBackendClass.getDeclaredField("vpnService")
+            vpnServiceField.isAccessible = true
+            
+            @Suppress("UNCHECKED_CAST")
+            val future = vpnServiceField.get(null) as CompletableFuture<GoBackend.VpnService>
+            if (!future.isDone) {
+                future.complete(this)
+                Log.d("TunnelyVpn", "Pre-completed GoBackend vpnService future")
+            }
+        } catch (e: Exception) {
+            Log.e("TunnelyVpn", "Failed to pre-complete GoBackend vpnService", e)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
