@@ -211,18 +211,9 @@ class ConnectFragment : Fragment() {
                     statusSubtext.text = "Establishing VPN tunnel"
                 }
 
-                // Start VPN service
-                val intent = android.content.Intent(
-                    requireContext(),
-                    TunnelyVpnService::class.java
-                )
-                requireContext().startService(intent)
+                // Start VPN service and connect
+                TunnelyVpnService.connect(requireContext(), prefs)
 
-                // Small delay to let service bind
-                kotlinx.coroutines.delay(500)
-
-                // The actual connection is handled by the service
-                // For now, simulate connection state change
                 connectStartTime = System.currentTimeMillis()
 
             } catch (e: Exception) {
@@ -237,13 +228,9 @@ class ConnectFragment : Fragment() {
     }
 
     private fun startDisconnect() {
-        viewLifecycleOwner.lifecycleScope.launch {
-            try {
-                TunnelyVpnService.vpnState.collectLatest { /* handled by observer */ }
-            } catch (e: Exception) {
-                // Handle error
-            }
-        }
+        val app = requireActivity().application as TunnelyApp
+        val prefs = app.prefs
+        TunnelyVpnService.disconnect(requireContext(), prefs)
     }
 
     private fun startAutoConfig() {

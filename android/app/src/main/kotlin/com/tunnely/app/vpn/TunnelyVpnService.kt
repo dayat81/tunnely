@@ -50,10 +50,34 @@ class TunnelyVpnService : VpnService() {
         val trafficStats: StateFlow<TrafficStats> = _trafficStats.asStateFlow()
 
         private var backend: GoBackend? = null
+        private var serviceInstance: TunnelyVpnService? = null
 
         val tunnel = object : Tunnel {
             override fun getName(): String = TUNNEL_NAME
             override fun onStateChange(newState: Tunnel.State) {}
+        }
+
+        fun connect(context: Context, prefs: VpnPreferences) {
+            // Start the service
+            val intent = Intent(context, TunnelyVpnService::class.java)
+            context.startService(intent)
+
+            // Connect via coroutine
+            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                // Wait for service to be ready
+                var attempts = 0
+                while (serviceInstance == null && attempts < 20) {
+                    kotlinx.coroutines.delay(100)
+                    attempts++
+                }
+                serviceInstance?.connect(prefs)
+            }
+        }
+
+        fun disconnect(context: Context, prefs: VpnPreferences) {
+            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                serviceInstance?.disconnect(prefs)
+            }
         }
     }
 
@@ -67,6 +91,7 @@ class TunnelyVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
+        serviceInstance = this
         createNotificationChannel()
     }
 

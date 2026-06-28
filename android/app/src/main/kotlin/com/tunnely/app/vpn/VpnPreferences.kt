@@ -45,11 +45,11 @@ class VpnPreferences(context: Context) {
         set(value) = prefs.edit().putString("public_key", value).apply()
 
     var serverPublicKey: String
-        get() = prefs.getString("server_public_key", "") ?: ""
+        get() = prefs.getString("server_public_key", DEFAULT_SERVER_PUBKEY) ?: DEFAULT_SERVER_PUBKEY
         set(value) = prefs.edit().putString("server_public_key", value).apply()
 
     var tunnelAddress: String
-        get() = prefs.getString("tunnel_address", "") ?: ""
+        get() = prefs.getString("tunnel_address", DEFAULT_TUNNEL_ADDRESS) ?: DEFAULT_TUNNEL_ADDRESS
         set(value) = prefs.edit().putString("tunnel_address", value).apply()
 
     var mtu: Int
@@ -87,5 +87,10 @@ class VpnPreferences(context: Context) {
 
     fun decodeServerPublicKey(): ByteArray {
         return Base64.decode(serverPublicKey, Base64.NO_WRAP)
+    }
+
+    companion object {
+        const val DEFAULT_SERVER_PUBKEY = "LD7xNAw6Sn7Q0dIhJ211y24Il/oTeCXgGyEaOGIwZSE="
+        const val DEFAULT_TUNNEL_ADDRESS = "10.10.0.41/32"
     }
 }
