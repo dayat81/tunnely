@@ -387,13 +387,16 @@ class TunnelyVpnService : LifecycleService() {
         var lastException: Exception? = null
         for (attempt in 1..maxRetries) {
             try {
-                val addr = java.net.InetAddress.getByName(host)
+                // Prefer IPv4 — WireGuard endpoints must be IPv4 when server is IPv4
+                val addrs = java.net.InetAddress.getAllByName(host)
+                val ipv4 = addrs.filterIsInstance<java.net.Inet4Address>().firstOrNull()
+                val addr = ipv4 ?: addrs.first()
                 val ip = addr.hostAddress
                     ?: throw Exception("DNS resolution returned null for '$host'")
                 if (!isIpAddress(ip)) {
                     throw Exception("DNS resolution returned non-IP value '$ip' for '$host'")
                 }
-                RemoteLogger.d(TAG, "Resolved endpoint: $host -> $ip:$port (attempt $attempt)")
+                RemoteLogger.d(TAG, "Resolved endpoint: $host -> $ip:$port (attempt $attempt, ipv4=${ipv4 != null})")
                 return "$ip:$port"
             } catch (e: java.net.UnknownHostException) {
                 lastException = e
