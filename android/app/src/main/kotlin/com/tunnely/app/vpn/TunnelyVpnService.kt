@@ -45,6 +45,18 @@ data class TrafficStats(
 
 class TunnelyVpnService : VpnService() {
 
+    /**
+     * Override startForeground to add service type for Android 14+
+     * This fixes GoBackend's internal startForeground() call that lacks the type parameter
+     */
+    override fun startForeground(id: Int, notification: Notification) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            super.startForeground(id, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        } else {
+            super.startForeground(id, notification)
+        }
+    }
+
     companion object {
         const val TUNNEL_NAME = "tunnely-vpn"
         const val NOTIFICATION_CHANNEL_ID = "tunnely_vpn"
