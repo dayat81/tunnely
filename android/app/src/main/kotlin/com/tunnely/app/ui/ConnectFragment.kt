@@ -1,15 +1,20 @@
 package com.tunnely.app.ui
 
 import android.animation.ObjectAnimator
+import android.app.Activity
+import android.content.Intent
+import android.net.VpnService
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.widget.Button
 import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import com.tunnely.app.R
@@ -24,6 +29,25 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 class ConnectFragment : Fragment() {
+
+    companion object {
+        private const val TAG = "ConnectFragment"
+    }
+
+    private val vpnPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            Log.d(TAG, "VPN permission granted, connecting...")
+            doConnect()
+        } else {
+            Log.w(TAG, "VPN permission denied")
+            statusText.text = "Permission denied"
+            statusSubtext.text = "VPN permission required"
+            btnConnect.isEnabled = true
+            stopPulseAnimation()
+        }
+    }
 
     private lateinit var statusCircle: View
     private lateinit var statusText: TextView
@@ -189,17 +213,34 @@ class ConnectFragment : Fragment() {
 
     private fun startConnect() {
         btnConnect.isEnabled = false
-        statusText.text = "Probing MTU..."
-        statusSubtext.text = "Discovering optimal MTU"
+        statusText.text = "Requesting VPN permission..."
+        statusSubtext.text = "Checking permissions"
         statusCircle.background.setTint(getColor(R.color.probing))
         startPulseAnimation()
 
+        // Check VPN permission FIRST (must be from Activity context)
+        val prepareIntent = VpnService.prepare(requireContext())
+        if (prepareIntent != null) {
+            // Need user to grant VPN permission
+            Log.d(TAG, "Requesting VPN permission...")
+            vpnPermissionLauncher.launch(prepareIntent)
+        } else {
+            // Permission already granted, proceed
+            doConnect()
+        }
+    }
+
+    private fun doConnect() {
         viewLifecycleOwner.lifecycleScope.launch {
             try {
                 val app = requireActivity().application as TunnelyApp
                 val prefs = app.prefs
 
                 // Step 1: MTU probe
+                withContext(Dispatchers.Main) {
+                    statusText.text = "Probing MTU..."
+                    statusSubtext.text = "Discovering optimal MTU"
+                }
                 if (prefs.autoMtu) {
                     val mtu = MtuProber.discover(prefs.serverAddress)
                     prefs.mtu = mtu
@@ -217,6 +258,7 @@ class ConnectFragment : Fragment() {
                 connectStartTime = System.currentTimeMillis()
 
             } catch (e: Exception) {
+                Log.e(TAG, "Connect failed", e)
                 withContext(Dispatchers.Main) {
                     statusText.text = "Error"
                     statusSubtext.text = e.message ?: "Connection failed"

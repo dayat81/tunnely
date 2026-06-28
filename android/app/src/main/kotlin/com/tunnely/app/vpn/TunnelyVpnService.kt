@@ -99,15 +99,7 @@ class TunnelyVpnService : VpnService() {
         }
 
         fun connect(context: Context, prefs: VpnPreferences) {
-            // Check VPN permission first
-            val prepareIntent = VpnService.prepare(context)
-            if (prepareIntent != null) {
-                // VPN permission not granted - need user to approve
-                Log.w(TAG, "VPN permission not granted, cannot connect")
-                _vpnState.value = VpnState.ERROR
-                return
-            }
-            
+            // VPN permission should already be granted by the Activity
             // Start service as foreground service (required for Android 14+)
             val intent = Intent(context, TunnelyVpnService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -243,13 +235,7 @@ class TunnelyVpnService : VpnService() {
                 builder.setMetered(false)
             builder.setBlocking(true)
 
-            // Double-check VPN permission before establish
-            val prepareResult = VpnService.prepare(this)
-            if (prepareResult != null) {
-                throw Exception("VPN permission not granted. Please approve VPN connection in system settings.")
-            }
-            
-            // Establish TUN interface
+            // Establish TUN interface (permission already granted by Activity)
             val fd = builder.establish()
                 ?: throw Exception("Failed to establish TUN interface - builder.establish() returned null")
             tunFd = fd
