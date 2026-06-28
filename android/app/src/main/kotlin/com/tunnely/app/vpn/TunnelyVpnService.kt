@@ -169,17 +169,19 @@ class TunnelyVpnService : LifecycleService() {
 
         connectJob = serviceScope.launch {
             try {
-                // Step 1: Auto-register peer on server
+                // Step 1: Auto-register peer on server (server generates keypair)
                 try {
                     val apiClient = ApiClient(prefs.serverAddress, prefs.serverPort)
-                    val clientPubkey = prefs.publicKey
-                    if (clientPubkey.isNotBlank()) {
-                        RemoteLogger.i(TAG, "Step 1: Auto-registering peer: $clientPubkey")
-                        apiClient.registerClient(clientPubkey)
-                        RemoteLogger.i(TAG, "Step 1: ✅ Auto-register done")
-                    } else {
-                        RemoteLogger.w(TAG, "Step 1: ⚠️ Public key is blank!")
+                    RemoteLogger.i(TAG, "Step 1: Auto-registering peer (server-side keygen)...")
+                    val reg = apiClient.registerClient()
+                    // Update private key if server generated a new one
+                    reg.privateKey?.let { newKey ->
+                        RemoteLogger.i(TAG, "  Using server-generated private key")
+                        prefs.privateKey = newKey
                     }
+                    prefs.serverPublicKey = reg.serverPublicKey
+                    prefs.tunnelAddress = reg.tunnelAddress
+                    RemoteLogger.i(TAG, "Step 1: ✅ Auto-register done: ${reg.tunnelAddress}")
                 } catch (e: Exception) {
                     RemoteLogger.w(TAG, "Step 1: ⚠️ Auto-register failed (non-fatal): ${e.message}")
                 }
