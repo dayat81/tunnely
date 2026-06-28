@@ -27,15 +27,15 @@
 
         <service
             android:name=".vpn.TunnelyVpnService"
-            android:foregroundServiceType="specialUse"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+        <service
+            android:name="com.wireguard.android.backend.GoBackend$VpnService"
             android:exported="false"
             android:permission="android.permission.BIND_VPN_SERVICE">
             <intent-filter>
                 <action android:name="android.net.VpnService" />
             </intent-filter>
-            <meta-data
-                android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON"
-                android:value="true" />
         </service>
 
     </application>
