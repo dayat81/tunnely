@@ -99,8 +99,22 @@ class TunnelyVpnService : VpnService() {
         }
 
         fun connect(context: Context, prefs: VpnPreferences) {
+            // Check VPN permission first
+            val prepareIntent = VpnService.prepare(context)
+            if (prepareIntent != null) {
+                // VPN permission not granted - need user to approve
+                Log.w(TAG, "VPN permission not granted, cannot connect")
+                _vpnState.value = VpnState.ERROR
+                return
+            }
+            
+            // Start service as foreground service (required for Android 14+)
             val intent = Intent(context, TunnelyVpnService::class.java)
-            context.startService(intent)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
 
             GlobalScope.launch(Dispatchers.IO) {
                 var attempts = 0
@@ -181,6 +195,15 @@ class TunnelyVpnService : VpnService() {
     suspend fun connect(prefs: VpnPreferences) {
         try {
             _vpnState.value = VpnState.CONNECTING
+            
+            // Ensure we're in foreground BEFORE any VPN operations
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    createNotification("Connecting..."),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                )
+            }
 
             // Build VPN tunnel using Android VpnService.Builder
             val builder = Builder()
@@ -220,9 +243,15 @@ class TunnelyVpnService : VpnService() {
                 builder.setMetered(false)
             builder.setBlocking(true)
 
+            // Double-check VPN permission before establish
+            val prepareResult = VpnService.prepare(this)
+            if (prepareResult != null) {
+                throw Exception("VPN permission not granted. Please approve VPN connection in system settings.")
+            }
+            
             // Establish TUN interface
             val fd = builder.establish()
-                ?: throw Exception("Failed to establish TUN interface")
+                ?: throw Exception("Failed to establish TUN interface - builder.establish() returned null")
             tunFd = fd
 
             // Build WireGuard userspace config string
@@ -272,7 +301,7 @@ class TunnelyVpnService : VpnService() {
             }
 
             _vpnState.value = VpnState.CONNECTED
-            updateNotification()
+            updateNotification("Connected")
 
         } catch (e: Exception) {
             Log.e(TAG, "Connect failed", e)
@@ -304,16 +333,16 @@ class TunnelyVpnService : VpnService() {
         }
     }
 
-    private fun updateNotification() {
+    private fun updateNotification(status: String? = null) {
         val nm = getSystemService(NotificationManager::class.java)
-        val status = when (_vpnState.value) {
+        val displayStatus = status ?: when (_vpnState.value) {
             VpnState.CONNECTED -> "Connected"
             VpnState.CONNECTING -> "Connecting..."
             VpnState.DISCONNECTING -> "Disconnecting..."
             VpnState.ERROR -> "Error"
             VpnState.DISCONNECTED -> "Disconnected"
         }
-        nm.notify(NOTIFICATION_ID, createNotification(status))
+        nm.notify(NOTIFICATION_ID, createNotification(displayStatus))
     }
 
     fun updateTrafficStats(rx: Long, tx: Long) {
