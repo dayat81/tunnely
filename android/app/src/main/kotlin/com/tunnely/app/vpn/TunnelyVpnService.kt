@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.Binder
@@ -18,6 +19,11 @@ import com.wireguard.config.Interface
 import com.wireguard.config.Peer
 import com.tunnely.app.MainActivity
 import com.tunnely.app.R
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -63,11 +69,11 @@ class TunnelyVpnService : VpnService() {
             context.startService(intent)
 
             // Connect via coroutine
-            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            GlobalScope.launch(Dispatchers.IO) {
                 // Wait for service to be ready
                 var attempts = 0
                 while (serviceInstance == null && attempts < 20) {
-                    kotlinx.coroutines.delay(100)
+                    delay(100)
                     attempts++
                 }
                 serviceInstance?.connect(prefs)
@@ -75,7 +81,7 @@ class TunnelyVpnService : VpnService() {
         }
 
         fun disconnect(context: Context, prefs: VpnPreferences) {
-            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            GlobalScope.launch(Dispatchers.IO) {
                 serviceInstance?.disconnect(prefs)
             }
         }
