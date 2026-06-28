@@ -89,6 +89,7 @@ class TunnelyVpnService : VpnService() {
         private var wgGetSocketV6Method: java.lang.reflect.Method? = null
         private var wgGetBytesMethod: java.lang.reflect.Method? = null
         private var wgGetConfigMethod: java.lang.reflect.Method? = null
+        private var goBackendVpnServiceField: java.lang.reflect.Field? = null
 
         init {
             try {
@@ -129,6 +130,18 @@ class TunnelyVpnService : VpnService() {
                 } catch (_: Exception) {
                     Log.w(TAG, "wgGetConfig not available — handshake check disabled")
                 }
+
+                // CRITICAL: Access GoBackend.vpnService CompletableFuture
+                // WireGuard Go code uses this to call protect() on its UDP sockets
+                // Without this, WireGuard handshake packets get routed through TUN (loop!)
+                try {
+                    goBackendVpnServiceField = goBackendClass.getDeclaredField("vpnService")
+                    goBackendVpnServiceField?.isAccessible = true
+                    Log.d(TAG, "GoBackend.vpnService field accessible — socket protect will work")
+                } catch (_: Exception) {
+                    Log.w(TAG, "GoBackend.vpnService field not accessible — manual protect only")
+                }
+
                 Log.d(TAG, "GoBackend native methods accessible via reflection")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to access GoBackend methods", e)
@@ -317,6 +330,19 @@ class TunnelyVpnService : VpnService() {
 
             Log.d(TAG, "Starting WireGuard tunnel...")
             Log.d(TAG, "Config (no keys): replace_peers=true, endpoint=${prefs.serverAddress}:${prefs.serverPort}")
+
+            // CRITICAL: Set GoBackend.vpnService so WireGuard Go code can call protect()
+            // on its UDP sockets BEFORE sending handshake packets.
+            // Without this, handshake packets get routed through TUN → loop → never connects.
+            try {
+                val futureClass = Class.forName("java.util.concurrent.CompletableFuture")
+                val completedFutureMethod = futureClass.getMethod("completedFuture", Any::class.java)
+                val future = completedFutureMethod.invoke(null, this@TunnelyVpnService)
+                goBackendVpnServiceField?.set(null, future)
+                Log.i(TAG, "GoBackend.vpnService set — WireGuard socket protect enabled")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to set GoBackend.vpnService: ${e.message} — manual protect only")
+            }
 
             val handle = wgTurnOnMethod?.invoke(null, TUNNEL_NAME, fd.detachFd(), wgConfig) as? Int
                 ?: throw Exception("wgTurnOn returned null")
