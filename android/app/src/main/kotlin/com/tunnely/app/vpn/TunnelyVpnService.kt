@@ -57,11 +57,16 @@ class TunnelyVpnService : VpnService() {
         private var tunnelHandle: Int = -1
         private var tunFd: ParcelFileDescriptor? = null
 
+        // Traffic baseline (recorded when VPN connects)
+        private var baselineRx: Long = -1
+        private var baselineTx: Long = -1
+
         // WireGuard native functions via reflection
         private var wgTurnOnMethod: java.lang.reflect.Method? = null
         private var wgTurnOffMethod: java.lang.reflect.Method? = null
         private var wgGetSocketV4Method: java.lang.reflect.Method? = null
         private var wgGetSocketV6Method: java.lang.reflect.Method? = null
+        private var wgGetBytesMethod: java.lang.reflect.Method? = null
 
         init {
             try {
@@ -90,6 +95,13 @@ class TunnelyVpnService : VpnService() {
                 wgGetSocketV6Method = goBackendClass.getDeclaredMethod(
                     "wgGetSocketV6", Int::class.javaPrimitiveType
                 ).apply { isAccessible = true }
+                try {
+                    wgGetBytesMethod = goBackendClass.getDeclaredMethod(
+                        "wgGetBytes", Int::class.javaPrimitiveType
+                    ).apply { isAccessible = true }
+                } catch (_: Exception) {
+                    // wgGetBytes may not exist in all builds
+                }
                 Log.d(TAG, "GoBackend native methods accessible via reflection")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to access GoBackend methods", e)
@@ -234,6 +246,21 @@ class TunnelyVpnService : VpnService() {
                 }
             }
 
+            // Split tunneling: only route selected apps through VPN
+            if (prefs.splitTunneling && prefs.splitApps.isNotEmpty()) {
+                for (packageName in prefs.splitApps) {
+                    try {
+                        builder.addAllowedApplication(packageName)
+                        Log.d(TAG, "Split tunnel: added $packageName")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to add $packageName to split tunnel", e)
+                    }
+                }
+                Log.i(TAG, "Split tunneling enabled for ${prefs.splitApps.size} apps")
+            } else {
+                Log.i(TAG, "Split tunneling disabled — all traffic through VPN")
+            }
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
                 builder.setMetered(false)
             builder.setBlocking(true)
@@ -287,6 +314,31 @@ class TunnelyVpnService : VpnService() {
             _vpnState.value = VpnState.CONNECTED
             updateNotification()
 
+            // Record baseline and start traffic stats polling
+            val uid = android.os.Process.myUid()
+            baselineRx = android.net.TrafficStats.getUidRxBytes(uid)
+            baselineTx = android.net.TrafficStats.getUidTxBytes(uid)
+            if (baselineRx < 0) baselineRx = 0
+            if (baselineTx < 0) baselineTx = 0
+
+            GlobalScope.launch(Dispatchers.IO) {
+                while (_vpnState.value == VpnState.CONNECTED && tunnelHandle >= 0) {
+                    try {
+                        val currentRx = android.net.TrafficStats.getUidRxBytes(uid)
+                        val currentTx = android.net.TrafficStats.getUidTxBytes(uid)
+                        if (currentRx >= 0 && currentTx >= 0) {
+                            _trafficStats.value = TrafficStats(
+                                rxBytes = currentRx - baselineRx,
+                                txBytes = currentTx - baselineTx
+                            )
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Traffic stats poll failed", e)
+                    }
+                    delay(2000)
+                }
+            }
+
         } catch (e: Exception) {
             Log.e(TAG, "Connect failed", e)
             _vpnState.value = VpnState.ERROR
@@ -308,6 +360,8 @@ class TunnelyVpnService : VpnService() {
 
             _vpnState.value = VpnState.DISCONNECTED
             _trafficStats.value = TrafficStats()
+            baselineRx = -1
+            baselineTx = -1
             updateNotification()
 
         } catch (e: Exception) {

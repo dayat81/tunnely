@@ -236,7 +236,23 @@ class ConnectFragment : Fragment() {
                 val app = requireActivity().application as TunnelyApp
                 val prefs = app.prefs
 
-                // Step 1: MTU probe
+                // Step 1: Auto-register peer with server (ensures public key is registered)
+                withContext(Dispatchers.Main) {
+                    statusText.text = "Registering..."
+                    statusSubtext.text = "Registering peer with server"
+                }
+                try {
+                    val apiClient = ApiClient(prefs.serverAddress, prefs.serverPort)
+                    val registration = apiClient.registerClient(prefs.publicKey)
+                    prefs.serverPublicKey = registration.serverPublicKey
+                    prefs.tunnelAddress = registration.tunnelAddress
+                    Log.d(TAG, "Peer registered: ${registration.tunnelAddress}")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Auto-register failed (may already be registered): ${e.message}")
+                    // Continue anyway — peer might already be registered
+                }
+
+                // Step 2: MTU probe
                 withContext(Dispatchers.Main) {
                     statusText.text = "Probing MTU..."
                     statusSubtext.text = "Discovering optimal MTU"
@@ -246,7 +262,7 @@ class ConnectFragment : Fragment() {
                     prefs.mtu = mtu
                 }
 
-                // Step 2: Connect VPN
+                // Step 3: Connect VPN
                 withContext(Dispatchers.Main) {
                     statusText.text = "Connecting..."
                     statusSubtext.text = "Establishing VPN tunnel"

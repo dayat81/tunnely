@@ -8,6 +8,7 @@
 
     <!-- Brand colors -->
     <color name="primary">#FF58A6FF</color>
+    <color name="accent">#FF58A6FF</color>
     <color name="connected">#FF3FB950</color>
     <color name="disconnected">#FFF85149</color>
     <color name="probing">#FFFFA657</color>

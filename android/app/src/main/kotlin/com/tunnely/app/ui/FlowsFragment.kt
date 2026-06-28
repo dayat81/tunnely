@@ -5,6 +5,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
+import androidx.cardview.widget.CardView
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -30,6 +31,15 @@ class FlowsFragment : Fragment() {
     private lateinit var btnSortDownlink: MaterialButton
     private lateinit var btnSortServer: MaterialButton
 
+    // Server stats views
+    private lateinit var statsCard: CardView
+    private lateinit var statsRxRate: TextView
+    private lateinit var statsRxTotal: TextView
+    private lateinit var statsTxRate: TextView
+    private lateinit var statsTxTotal: TextView
+    private lateinit var statsFlows: TextView
+    private lateinit var statsFlowsTotal: TextView
+
     private var flowMonitor: FlowMonitor? = null
 
     override fun onCreateView(
@@ -46,7 +56,11 @@ class FlowsFragment : Fragment() {
         initViews(view)
         setupRecyclerView()
         setupSortButtons()
-        observeFlows()
+
+        // Show empty state initially
+        updateEmptyState(true, false)
+
+        // Observe VPN state to start/stop flow monitoring
         observeVpnState()
     }
 
@@ -57,6 +71,15 @@ class FlowsFragment : Fragment() {
         btnSortUplink = view.findViewById(R.id.btn_sort_uplink)
         btnSortDownlink = view.findViewById(R.id.btn_sort_downlink)
         btnSortServer = view.findViewById(R.id.btn_sort_server)
+
+        // Server stats
+        statsCard = view.findViewById(R.id.stats_card)
+        statsRxRate = view.findViewById(R.id.stats_rx_rate)
+        statsRxTotal = view.findViewById(R.id.stats_rx_total)
+        statsTxRate = view.findViewById(R.id.stats_tx_rate)
+        statsTxTotal = view.findViewById(R.id.stats_tx_total)
+        statsFlows = view.findViewById(R.id.stats_flows)
+        statsFlowsTotal = view.findViewById(R.id.stats_flows_total)
     }
 
     private fun setupRecyclerView() {
@@ -66,35 +89,17 @@ class FlowsFragment : Fragment() {
     }
 
     private fun setupSortButtons() {
-        btnSortUplink.setOnClickListener {
-            flowMonitor?.setSortMode(FlowSortMode.UPLINK)
-            updateSortButtons(FlowSortMode.UPLINK)
-        }
-        btnSortDownlink.setOnClickListener {
-            flowMonitor?.setSortMode(FlowSortMode.DOWNLINK)
-            updateSortButtons(FlowSortMode.DOWNLINK)
-        }
-        btnSortServer.setOnClickListener {
-            flowMonitor?.setSortMode(FlowSortMode.SERVER)
-            updateSortButtons(FlowSortMode.SERVER)
+        sortToggle.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            when (checkedId) {
+                R.id.btn_sort_downlink -> flowMonitor?.setSortMode(FlowSortMode.DOWNLINK)
+                R.id.btn_sort_uplink -> flowMonitor?.setSortMode(FlowSortMode.UPLINK)
+                R.id.btn_sort_server -> flowMonitor?.setSortMode(FlowSortMode.SERVER)
+            }
         }
 
         // Default selection
-        updateSortButtons(FlowSortMode.DOWNLINK)
-    }
-
-    private fun updateSortButtons(mode: FlowSortMode) {
-        btnSortUplink.isEnabled = mode != FlowSortMode.UPLINK
-        btnSortDownlink.isEnabled = mode != FlowSortMode.DOWNLINK
-        btnSortServer.isEnabled = mode != FlowSortMode.SERVER
-    }
-
-    private fun observeFlows() {
-        viewLifecycleOwner.lifecycleScope.launch {
-            // This would be connected to actual FlowMonitor
-            // For now, show empty state
-            updateEmptyState(true)
-        }
+        btnSortDownlink.isChecked = true
     }
 
     private fun observeVpnState() {
@@ -103,21 +108,43 @@ class FlowsFragment : Fragment() {
                 withContext(Dispatchers.Main) {
                     when (state) {
                         VpnState.CONNECTED -> {
-                            // Start flow monitoring
                             val app = requireActivity().application as TunnelyApp
                             val apiClient = ApiClient(
                                 app.prefs.serverAddress,
                                 app.prefs.serverPort
                             )
+
+                            // Extract IP from tunnelAddress (e.g., "10.10.0.45/32" → "10.10.0.45")
+                            val tunnelIp = app.prefs.tunnelAddress
+                                .split(",").first().trim()
+                                .split("/").first().trim()
+
                             flowMonitor = FlowMonitor(apiClient, app.prefs)
-                            flowMonitor?.start(app.prefs.tunnelAddress)
+                            flowMonitor?.start(tunnelIp)
+
+                            // Show stats card
+                            statsCard.visibility = View.VISIBLE
 
                             // Observe flow data
                             viewLifecycleOwner.lifecycleScope.launch {
                                 flowMonitor?.flows?.collectLatest { flows ->
                                     withContext(Dispatchers.Main) {
                                         adapter.submitList(flows)
-                                        updateEmptyState(flows.isEmpty())
+                                        updateEmptyState(flows.isEmpty(), true)
+                                    }
+                                }
+                            }
+
+                            // Observe server stats
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                flowMonitor?.serverStats?.collectLatest { stats ->
+                                    withContext(Dispatchers.Main) {
+                                        statsRxRate.text = formatRate(stats.rxRate)
+                                        statsRxTotal.text = formatBytes(stats.wgRx)
+                                        statsTxRate.text = formatRate(stats.txRate)
+                                        statsTxTotal.text = formatBytes(stats.wgTx)
+                                        statsFlows.text = "${stats.activeFlows}"
+                                        statsFlowsTotal.text = "${stats.totalFlows} total"
                                     }
                                 }
                             }
@@ -125,7 +152,8 @@ class FlowsFragment : Fragment() {
                         else -> {
                             flowMonitor?.stop()
                             adapter.submitList(emptyList())
-                            updateEmptyState(true)
+                            updateEmptyState(false, false)
+                            statsCard.visibility = View.GONE
                         }
                     }
                 }
@@ -133,13 +161,35 @@ class FlowsFragment : Fragment() {
         }
     }
 
-    private fun updateEmptyState(isEmpty: Boolean) {
-        if (isEmpty) {
+    private fun updateEmptyState(isEmpty: Boolean, isConnected: Boolean) {
+        if (!isConnected) {
+            emptyView.text = "Connect to VPN first"
+            emptyView.visibility = View.VISIBLE
+            recyclerView.visibility = View.GONE
+        } else if (isEmpty) {
+            emptyView.text = "No active flows yet\nBrowse a website or use an app to see connections"
             emptyView.visibility = View.VISIBLE
             recyclerView.visibility = View.GONE
         } else {
             emptyView.visibility = View.GONE
             recyclerView.visibility = View.VISIBLE
+        }
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        return when {
+            bytes < 1024 -> "$bytes B"
+            bytes < 1024 * 1024 -> "${bytes / 1024} KB"
+            bytes < 1024 * 1024 * 1024 -> "${"%.1f".format(bytes / (1024.0 * 1024.0))} MB"
+            else -> "${"%.2f".format(bytes / (1024.0 * 1024.0 * 1024.0))} GB"
+        }
+    }
+
+    private fun formatRate(bytesPerSec: Long): String {
+        return when {
+            bytesPerSec < 1024 -> "$bytesPerSec B/s"
+            bytesPerSec < 1024 * 1024 -> "${bytesPerSec / 1024} KB/s"
+            else -> "${"%.1f".format(bytesPerSec / (1024.0 * 1024.0))} MB/s"
         }
     }
 

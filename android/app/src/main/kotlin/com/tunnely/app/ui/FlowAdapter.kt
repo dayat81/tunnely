@@ -33,15 +33,24 @@ class FlowAdapter : ListAdapter<FlowEntry, FlowAdapter.FlowViewHolder>(FlowDiffC
             protocolBadge.text = entry.protocol
 
             // Set protocol badge color
-            val badgeColor = if (entry.protocol.uppercase() == "TCP") {
+            val badgeColor = if (entry.protocol.uppercase().startsWith("TCP")) {
                 itemView.context.getColor(R.color.protocol_tcp)
             } else {
                 itemView.context.getColor(R.color.protocol_udp)
             }
             protocolBadge.background.setTint(badgeColor)
 
-            uplinkText.text = "↑ ${entry.displayUplink}"
-            downlinkText.text = "↓ ${entry.displayDownlink}"
+            if (entry.uplinkBytes > 0 || entry.downlinkBytes > 0) {
+                uplinkText.text = "↑ ${entry.displayUplink}"
+                downlinkText.text = "↓ ${entry.displayDownlink}"
+                uplinkText.visibility = View.VISIBLE
+                downlinkText.visibility = View.VISIBLE
+            } else {
+                // Local flows without byte counters — show as active connection
+                uplinkText.text = "● active"
+                uplinkText.setTextColor(itemView.context.getColor(R.color.accent))
+                downlinkText.visibility = View.GONE
+            }
         }
     }
 

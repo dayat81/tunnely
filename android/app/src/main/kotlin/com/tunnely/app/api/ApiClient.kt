@@ -26,7 +26,8 @@ class ApiClient(
         .readTimeout(10, TimeUnit.SECONDS)
         .build()
 
-    private val baseUrl = "https://$serverAddress"
+    // Registration API is on netprobe.xyz (not osig.aksa.ai which routes to Grafana)
+    private val baseUrl = "https://netprobe.xyz"
 
     /**
      * Register client with the VPN server and get configuration.
@@ -70,28 +71,51 @@ class ApiClient(
                 .build()
 
             val response = client.newCall(request).execute()
-            val body = response.body?.string() ?: "[]"
+            val body = response.body?.string() ?: "{}"
 
             if (!response.isSuccessful) {
                 return@withContext emptyList()
             }
 
-            val array = JSONArray(body)
+            val json = JSONObject(body)
+            val array = json.optJSONArray("flows_detail") ?: return@withContext emptyList()
             val flows = mutableListOf<FlowEntry>()
 
             for (i in 0 until array.length()) {
                 val obj = array.getJSONObject(i)
                 flows.add(
                     FlowEntry(
-                        server = obj.optString("server", "unknown"),
-                        port = obj.optInt("port", 0),
-                        protocol = obj.optString("protocol", "UDP"),
-                        uplinkBytes = obj.optLong("uplink", 0),
-                        downlinkBytes = obj.optLong("downlink", 0)
+                        server = obj.optString("server_ip", obj.optString("server", "unknown")),
+                        port = obj.optInt("server_port", obj.optInt("port", 0)),
+                        protocol = obj.optString("proto", obj.optString("protocol", "UDP")),
+                        uplinkBytes = obj.optLong("uplink", obj.optLong("tx_bytes", 0)),
+                        downlinkBytes = obj.optLong("downlink", obj.optLong("rx_bytes", 0))
                     )
                 )
             }
 
             flows
+        }
+
+    /**
+     * Get raw traffic stats JSON for a specific tunnel IP.
+     * Returns the full JSON response with peer stats, rates, flows count.
+     */
+    suspend fun getTrafficStatsRaw(tunnelIp: String): JSONObject? =
+        withContext(Dispatchers.IO) {
+            try {
+                val request = Request.Builder()
+                    .url("$baseUrl/api/vpn/traffic/client/$tunnelIp")
+                    .get()
+                    .build()
+
+                val response = client.newCall(request).execute()
+                val body = response.body?.string() ?: return@withContext null
+
+                if (!response.isSuccessful) return@withContext null
+                JSONObject(body)
+            } catch (_: Exception) {
+                null
+            }
         }
 }
