@@ -236,6 +236,10 @@ class TunnelyVpnService : VpnService() {
                 ?: throw Exception("Failed to establish TUN - VPN permission not granted?")
             tunFd = fd
 
+            // Resolve hostname BEFORE establishing TUN (after establish(), DNS goes through tunnel and fails)
+            val resolvedEndpoint = resolveEndpoint(prefs.serverAddress, prefs.serverPort)
+            Log.d(TAG, "Endpoint resolved: ${prefs.serverAddress} -> $resolvedEndpoint")
+
             // Build WireGuard UAPI config (NO mtu, NO listen_port)
             val privateKeyBytes = prefs.decodePrivateKey()
             val privateKeyHex = bytesToHex(privateKeyBytes)
@@ -246,7 +250,7 @@ class TunnelyVpnService : VpnService() {
                 append("private_key=$privateKeyHex\n")
                 append("replace_peers=true\n")
                 append("public_key=$serverKeyHex\n")
-                append("endpoint=${prefs.serverAddress}:${prefs.serverPort}\n")
+                append("endpoint=$resolvedEndpoint\n")
                 append("persistent_keepalive_interval=25\n")
                 append("replace_allowed_ips=true\n")
                 for (ip in prefs.allowedIps.split(",").map { it.trim() }) {
@@ -325,6 +329,16 @@ class TunnelyVpnService : VpnService() {
 
     fun updateTrafficStats(rx: Long, tx: Long) {
         _trafficStats.value = TrafficStats(rx, tx)
+    }
+
+    private fun resolveEndpoint(host: String, port: Int): String {
+        // If already an IP, just use it
+        if (host.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$"))) return "$host:$port"
+        // Resolve hostname to IP — MUST happen before TUN is established
+        val addr = java.net.InetAddress.getByName(host)
+        val ip = addr.hostAddress ?: throw Exception("DNS resolution returned null for '$host'")
+        Log.d(TAG, "Resolved endpoint: $host -> $ip:$port")
+        return "$ip:$port"
     }
 
     private fun bytesToHex(bytes: ByteArray): String {
