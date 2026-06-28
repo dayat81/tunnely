@@ -23,4 +23,7 @@
     <!-- Bottom nav -->
     <color name="bottom_nav_active">#FF58A6FF</color>
     <color name="bottom_nav_inactive">#FF8B949E</color>
+
+    <!-- Icon background -->
+    <color name="ic_launcher_background">#FF000000</color>
 </resources>
