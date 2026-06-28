@@ -18,7 +18,7 @@ data class VpnRegistration(
 )
 
 class ApiClient(
-    private val serverAddress: String = "osig.aksa.ai",
+    private val serverAddress: String = "tunnely.site",
     private val serverPort: Int = 51820
 ) {
     private val client = OkHttpClient.Builder()
@@ -26,8 +26,8 @@ class ApiClient(
         .readTimeout(10, TimeUnit.SECONDS)
         .build()
 
-    // Registration API is on netprobe.xyz (not osig.aksa.ai which routes to Grafana)
-    private val baseUrl = "https://netprobe.xyz"
+    // Registration API is on tunnely.site
+    private val baseUrl = "https://tunnely.site"
 
     /**
      * Register client with the VPN server and get configuration.

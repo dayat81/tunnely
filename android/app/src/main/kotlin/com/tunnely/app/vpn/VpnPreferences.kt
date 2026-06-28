@@ -10,7 +10,7 @@ class VpnPreferences(context: Context) {
         context.getSharedPreferences("tunnely_prefs", Context.MODE_PRIVATE)
 
     var serverAddress: String
-        get() = prefs.getString("server_address", "osig.aksa.ai") ?: "osig.aksa.ai"
+        get() = prefs.getString("server_address", "tunnely.site") ?: "tunnely.site"
         set(value) = prefs.edit().putString("server_address", value).apply()
 
     var serverPort: Int
