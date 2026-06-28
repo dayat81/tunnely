@@ -91,6 +91,6 @@ class VpnPreferences(context: Context) {
 
     companion object {
         const val DEFAULT_SERVER_PUBKEY = "LD7xNAw6Sn7Q0dIhJ211y24Il/oTeCXgGyEaOGIwZSE="
-        const val DEFAULT_TUNNEL_ADDRESS = "10.10.0.41/32"
+        const val DEFAULT_TUNNEL_ADDRESS = "10.10.0.45/32"
     }
 }
