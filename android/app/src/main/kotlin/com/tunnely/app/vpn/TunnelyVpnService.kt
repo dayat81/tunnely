@@ -43,7 +43,7 @@ data class TrafficStats(
     val txBytes: Long = 0
 )
 
-class TunnelyVpnService : VpnService() {
+class TunnelyVpnService : GoBackend.VpnService() {
 
     companion object {
         const val TUNNEL_NAME = "tunnely-vpn"
