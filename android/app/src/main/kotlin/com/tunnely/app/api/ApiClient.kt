@@ -58,9 +58,16 @@ class ApiClient(
             }
 
             val data = JSONObject(body)
+            // API returns "assigned_ip" (e.g. "10.10.0.45"), app needs "tunnel_address" with CIDR (e.g. "10.10.0.45/32")
+            val assignedIp = data.optString("assigned_ip", "")
+            val tunnelAddress = if (assignedIp.isNotBlank()) {
+                if (assignedIp.contains("/")) assignedIp else "$assignedIp/32"
+            } else {
+                data.optString("tunnel_address", "")
+            }
             val reg = VpnRegistration(
                 serverPublicKey = data.getString("server_public_key"),
-                tunnelAddress = data.getString("tunnel_address"),
+                tunnelAddress = tunnelAddress,
                 endpoint = "$serverAddress:$serverPort"
             )
             Log.i("ApiClient", "  ✅ Registered: tunnel=${reg.tunnelAddress}, server_key=${reg.serverPublicKey}")
