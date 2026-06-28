@@ -302,6 +302,21 @@ class TunnelyVpnService : VpnService() {
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
                 builder.setMetered(false)
+
+            // CRITICAL: Tell Android which network to use for VPN's outbound traffic.
+            // Without this, WireGuard's UDP handshake packets get routed through TUN → loop.
+            // setUnderlyingNetworks ensures WireGuard UDP goes through the physical network.
+            try {
+                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+                val activeNetwork = cm.activeNetwork
+                if (activeNetwork != null) {
+                    builder.setUnderlyingNetworks(arrayOf(activeNetwork))
+                    Log.i(TAG, "setUnderlyingNetworks: ${activeNetwork} — WireGuard UDP will bypass TUN")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "setUnderlyingNetworks failed: ${e.message}")
+            }
+
             builder.setBlocking(true)
 
             val fd = builder.establish()
@@ -354,13 +369,22 @@ class TunnelyVpnService : VpnService() {
             tunnelHandle = handle
             Log.d(TAG, "WireGuard tunnel started, handle: $tunnelHandle")
 
+            // Protect WireGuard sockets to bypass VPN routing
+            // This is a SECOND defense after setUnderlyingNetworks
             try {
                 val sock4 = wgGetSocketV4Method?.invoke(null, tunnelHandle) as? Int ?: -1
                 val sock6 = wgGetSocketV6Method?.invoke(null, tunnelHandle) as? Int ?: -1
-                if (sock4 >= 0) protect(sock4)
-                if (sock6 >= 0) protect(sock6)
+                Log.d(TAG, "WireGuard sockets: v4=$sock4, v6=$sock6")
+                if (sock4 >= 0) {
+                    val result = protect(sock4)
+                    Log.i(TAG, "protect(sock4=$sock4) = $result")
+                }
+                if (sock6 >= 0) {
+                    val result = protect(sock6)
+                    Log.i(TAG, "protect(sock6=$sock6) = $result")
+                }
             } catch (e: Exception) {
-                Log.w(TAG, "Socket protect failed (non-fatal)", e)
+                Log.e(TAG, "Socket protect failed", e)
             }
 
             _vpnState.value = VpnState.CONNECTED
