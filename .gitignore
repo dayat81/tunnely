@@ -16,3 +16,4 @@ Thumbs.db
 *.keystore
 tunnely-v2.1.3-signed.apk
 *.apk
+__pycache__/

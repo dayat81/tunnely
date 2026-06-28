@@ -108,7 +108,7 @@ class ConnectFragment : Fragment() {
 
     private fun setupClickListeners() {
         btnConnect.setOnClickListener {
-            val currentState = TunnelyVpnService.vpnState.value
+            val currentState = UdpTunnelVpnService.vpnState.value
             RemoteLogger.i(TAG, "🔵 CONNECT BUTTON CLICKED! currentState=$currentState")
             when (currentState) {
                 VpnState.DISCONNECTED, VpnState.ERROR -> {
@@ -138,7 +138,7 @@ class ConnectFragment : Fragment() {
 
     private fun observeVpnState() {
         viewLifecycleOwner.lifecycleScope.launch {
-            TunnelyVpnService.vpnState.collectLatest { state ->
+            UdpTunnelVpnService.vpnState.collectLatest { state ->
                 withContext(Dispatchers.Main) {
                     updateUIForState(state)
                 }
@@ -148,7 +148,7 @@ class ConnectFragment : Fragment() {
 
     private fun observeTrafficStats() {
         viewLifecycleOwner.lifecycleScope.launch {
-            TunnelyVpnService.trafficStats.collectLatest { stats ->
+            UdpTunnelVpnService.trafficStats.collectLatest { stats ->
                 withContext(Dispatchers.Main) {
                     trafficRx.text = formatBytes(stats.rxBytes)
                     trafficTx.text = formatBytes(stats.txBytes)
@@ -159,10 +159,10 @@ class ConnectFragment : Fragment() {
 
     private fun observeConnectionHealth() {
         viewLifecycleOwner.lifecycleScope.launch {
-            TunnelyVpnService.connectionHealth.collectLatest { health ->
+            UdpTunnelVpnService.connectionHealth.collectLatest { health ->
                 withContext(Dispatchers.Main) {
                     // Update status subtext with handshake info when connected
-                    if (TunnelyVpnService.vpnState.value == VpnState.CONNECTED) {
+                    if (UdpTunnelVpnService.vpnState.value == VpnState.CONNECTED) {
                         statusSubtext.text = health.statusText
                         // Pulse animation if waiting for handshake
                         if (!health.isHandshakeOk && health.error.isEmpty()) {
@@ -264,77 +264,26 @@ class ConnectFragment : Fragment() {
     }
 
     private fun doConnect() {
-        RemoteLogger.i(TAG, "🟡 doConnect() called")
+        RemoteLogger.i(TAG, "🟡 doConnect() called (UDP tunnel mode)")
         viewLifecycleOwner.lifecycleScope.launch {
             try {
                 val app = requireActivity().application as TunnelyApp
                 val prefs = app.prefs
 
-                // Step 1: Generate keypair if not exists (like netprobe autoConfig)
-                if (prefs.privateKey.isBlank()) {
-                    RemoteLogger.i(TAG, "Step 1: Generating new WireGuard keypair...")
-                    val pubKey = prefs.generateKeyPair()
-                    RemoteLogger.i(TAG, "  Generated pubkey: $pubKey")
-                } else {
-                    // Verify public key matches private key (re-derive)
-                    val derivedPub = prefs.derivePublicKey()
-                    if (derivedPub != prefs.publicKey) {
-                        RemoteLogger.w(TAG, "Step 1: Public key mismatch — re-deriving from private key")
-                        prefs.publicKey = derivedPub
-                    }
-                    RemoteLogger.i(TAG, "Step 1: Using existing keypair, pubkey: ${prefs.publicKey}")
-                }
+                // UDP tunnel mode: no keys, no registration, no API call.
+                // Server auto-assigns IP on first packet.
+                RemoteLogger.i(TAG, "Server: ${prefs.serverAddress} (UDP tunnel port 5555)")
+                RemoteLogger.i(TAG, "Skipping WireGuard key gen + API registration (not needed for UDP tunnel)")
 
-                RemoteLogger.i(TAG, "Server: ${prefs.serverAddress}:${prefs.serverPort}")
-                RemoteLogger.i(TAG, "Server pubkey: ${prefs.serverPublicKey}")
-                RemoteLogger.i(TAG, "Client pubkey: ${prefs.publicKey}")
-
-                // Step 2: Register with server (like netprobe registerWithServer)
-                withContext(Dispatchers.Main) {
-                    statusText.text = "Registering..."
-                    statusSubtext.text = "Registering peer with server"
-                }
-                try {
-                    RemoteLogger.i(TAG, "Step 2: Registering with server...")
-                    val apiClient = ApiClient(prefs.serverAddress, prefs.serverPort)
-                    val result = apiClient.registerClient(prefs.publicKey)
-                    // Save ALL config from response (exactly like netprobe)
-                    prefs.serverPublicKey = result.serverPublicKey
-                    prefs.tunnelAddress = result.tunnelAddress
-                    RemoteLogger.i(TAG, "  ✅ Registered: tunnel=${result.tunnelAddress}, server_key=${result.serverPublicKey}")
-                } catch (e: Exception) {
-                    RemoteLogger.e(TAG, "  ❌ Registration failed: ${e.message}")
-                    withContext(Dispatchers.Main) {
-                        statusText.text = "Registration Failed"
-                        statusSubtext.text = "Cannot reach server: ${e.message}"
-                        btnConnect.isEnabled = true
-                        stopPulseAnimation()
-                    }
-                    return@launch
-                }
-
-                // Step 3: Verify config (like netprobe hasConfig check)
-                if (!prefs.hasConfig()) {
-                    RemoteLogger.e(TAG, "Step 3: ❌ Invalid config — missing fields")
-                    withContext(Dispatchers.Main) {
-                        statusText.text = "Config Error"
-                        statusSubtext.text = "Missing VPN config — try again"
-                        btnConnect.isEnabled = true
-                        stopPulseAnimation()
-                    }
-                    return@launch
-                }
-                RemoteLogger.i(TAG, "Step 3: ✅ Config valid: tunnel=${prefs.tunnelAddress}")
-
-                // Step 4: Connect VPN via GoBackend
+                // Step 1: Connect VPN via UDP tunnel
                 withContext(Dispatchers.Main) {
                     statusText.text = "Connecting..."
-                    statusSubtext.text = "Establishing VPN tunnel"
+                    statusSubtext.text = "Establishing UDP tunnel"
                 }
-                RemoteLogger.i(TAG, "Step 4: Calling TunnelyVpnService.connect()...")
-                TunnelyVpnService.connect(requireContext(), prefs)
+                RemoteLogger.i(TAG, "Step 1: Calling UdpTunnelVpnService.connect()...")
+                UdpTunnelVpnService.connect(requireContext(), prefs)
                 connectStartTime = System.currentTimeMillis()
-                RemoteLogger.i(TAG, "  ✅ TunnelyVpnService.connect() called")
+                RemoteLogger.i(TAG, "  ✅ UdpTunnelVpnService.connect() called")
 
             } catch (e: Exception) {
                 RemoteLogger.e(TAG, "❌ Connect failed", e)
@@ -351,7 +300,7 @@ class ConnectFragment : Fragment() {
     private fun startDisconnect() {
         val app = requireActivity().application as TunnelyApp
         val prefs = app.prefs
-        TunnelyVpnService.disconnect(requireContext(), prefs)
+        UdpTunnelVpnService.disconnect(requireContext(), prefs)
     }
 
     private fun startAutoConfig() {

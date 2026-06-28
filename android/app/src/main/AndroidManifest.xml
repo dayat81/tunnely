@@ -42,5 +42,16 @@
             android:exported="false"
             android:foregroundServiceType="specialUse" />
 
+        <!-- UdpTunnelVpnService: lightweight UDP tunnel (no WireGuard) -->
+        <service
+            android:name=".vpn.UdpTunnelVpnService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="specialUse">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+
     </application>
 </manifest>

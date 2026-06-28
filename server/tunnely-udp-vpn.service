@@ -1,0 +1,19 @@
+[Unit]
+Description=Tunnely UDP VPN Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/tunnely/udp_vpn_server.py --port 5555 --subnet 10.20.0.0/24 --tun-name tunnely0 --ext-iface ens4
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+# Security
+NoNewPrivileges=false
+ProtectSystem=false
+
+[Install]
+WantedBy=multi-user.target

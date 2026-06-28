@@ -104,7 +104,7 @@ class FlowsFragment : Fragment() {
 
     private fun observeVpnState() {
         viewLifecycleOwner.lifecycleScope.launch {
-            TunnelyVpnService.vpnState.collectLatest { state ->
+            UdpTunnelVpnService.vpnState.collectLatest { state ->
                 withContext(Dispatchers.Main) {
                     when (state) {
                         VpnState.CONNECTED -> {
