@@ -84,6 +84,7 @@ class ConnectFragment : Fragment() {
         setupClickListeners()
         observeVpnState()
         observeTrafficStats()
+        observeConnectionHealth()
         updateDisplay()
     }
 
@@ -141,6 +142,25 @@ class ConnectFragment : Fragment() {
                 withContext(Dispatchers.Main) {
                     trafficRx.text = formatBytes(stats.rxBytes)
                     trafficTx.text = formatBytes(stats.txBytes)
+                }
+            }
+        }
+    }
+
+    private fun observeConnectionHealth() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            TunnelyVpnService.connectionHealth.collectLatest { health ->
+                withContext(Dispatchers.Main) {
+                    // Update status subtext with handshake info when connected
+                    if (TunnelyVpnService.vpnState.value == VpnState.CONNECTED) {
+                        statusSubtext.text = health.statusText
+                        // Pulse animation if waiting for handshake
+                        if (!health.isHandshakeOk && health.error.isEmpty()) {
+                            startPulseAnimation()
+                        } else {
+                            stopPulseAnimation()
+                        }
+                    }
                 }
             }
         }
