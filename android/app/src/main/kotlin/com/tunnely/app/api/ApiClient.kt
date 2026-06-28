@@ -1,5 +1,6 @@
 package com.tunnely.app.api
 
+import android.util.Log
 import com.tunnely.app.vpn.FlowEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -35,28 +36,35 @@ class ApiClient(
      */
     suspend fun registerClient(clientPublicKey: String): VpnRegistration =
         withContext(Dispatchers.IO) {
+            val url = "$baseUrl/api/vpn/register"
+            Log.i("ApiClient", "📡 POST $url")
+            Log.i("ApiClient", "  public_key=$clientPublicKey")
             val json = JSONObject().apply {
                 put("public_key", clientPublicKey)
             }
 
             val request = Request.Builder()
-                .url("$baseUrl/api/vpn/register")
+                .url(url)
                 .post(json.toString().toRequestBody("application/json".toMediaType()))
                 .build()
 
             val response = client.newCall(request).execute()
             val body = response.body?.string() ?: throw Exception("Empty response")
+            Log.i("ApiClient", "  Response: ${response.code} ${body.take(200)}")
 
             if (!response.isSuccessful) {
+                Log.e("ApiClient", "  ❌ Registration failed: ${response.code}")
                 throw Exception("Registration failed: ${response.code} - $body")
             }
 
             val data = JSONObject(body)
-            VpnRegistration(
+            val reg = VpnRegistration(
                 serverPublicKey = data.getString("server_public_key"),
                 tunnelAddress = data.getString("tunnel_address"),
                 endpoint = "$serverAddress:$serverPort"
             )
+            Log.i("ApiClient", "  ✅ Registered: tunnel=${reg.tunnelAddress}, server_key=${reg.serverPublicKey}")
+            reg
         }
 
     /**

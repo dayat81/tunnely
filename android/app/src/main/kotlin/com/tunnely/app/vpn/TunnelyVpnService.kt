@@ -98,10 +98,19 @@ class TunnelyVpnService : LifecycleService() {
         }
 
         fun connect(context: Context, prefs: VpnPreferences) {
+            Log.i(TAG, "🟣 TunnelyVpnService.connect() called")
+            Log.i(TAG, "  serverAddress=${prefs.serverAddress}")
+            Log.i(TAG, "  serverPort=${prefs.serverPort}")
+            Log.i(TAG, "  serverPubKey=${prefs.serverPublicKey}")
+            Log.i(TAG, "  tunnelAddress=${prefs.tunnelAddress}")
+            Log.i(TAG, "  privateKey=${prefs.privateKey.take(8)}...")
+            Log.i(TAG, "  publicKey=${prefs.publicKey}")
             val intent = Intent(context, TunnelyVpnService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                Log.i(TAG, "  → startForegroundService()")
                 context.startForegroundService(intent)
             } else {
+                Log.i(TAG, "  → startService()")
                 context.startService(intent)
             }
 
@@ -111,6 +120,7 @@ class TunnelyVpnService : LifecycleService() {
                     delay(100)
                     attempts++
                 }
+                Log.i(TAG, "  Service instance ready after ${attempts * 100}ms, calling doConnect()")
                 serviceInstance?.doConnect(prefs)
             }
         }
@@ -128,13 +138,16 @@ class TunnelyVpnService : LifecycleService() {
 
     override fun onCreate() {
         super.onCreate()
+        Log.i(TAG, "🟠 TunnelyVpnService.onCreate()")
         serviceInstance = this
         backend = GoBackend(this)
+        Log.i(TAG, "  GoBackend created, serviceInstance set")
         createNotificationChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
+        Log.i(TAG, "🟠 onStartCommand() action=${intent?.action}")
         startForeground(NOTIFICATION_ID, createNotification("Disconnected"))
         return START_STICKY
     }
@@ -148,6 +161,7 @@ class TunnelyVpnService : LifecycleService() {
     }
 
     private fun doConnect(prefs: VpnPreferences) {
+        Log.i(TAG, "🔴 doConnect() started")
         connectJob?.cancel()
         _vpnState.value = VpnState.CONNECTING
         _connectionHealth.value = ConnectionHealth()
@@ -159,42 +173,62 @@ class TunnelyVpnService : LifecycleService() {
                     val apiClient = ApiClient(prefs.serverAddress, prefs.serverPort)
                     val clientPubkey = prefs.publicKey
                     if (clientPubkey.isNotBlank()) {
-                        Log.d(TAG, "Auto-registering peer: $clientPubkey")
+                        Log.i(TAG, "Step 1: Auto-registering peer: $clientPubkey")
                         apiClient.registerClient(clientPubkey)
+                        Log.i(TAG, "Step 1: ✅ Auto-register done")
+                    } else {
+                        Log.w(TAG, "Step 1: ⚠️ Public key is blank!")
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Auto-register failed (non-fatal): ${e.message}")
+                    Log.w(TAG, "Step 1: ⚠️ Auto-register failed (non-fatal): ${e.message}")
                 }
 
                 // Step 2: Probe MTU
                 try {
                     if (prefs.autoMtu) {
+                        Log.i(TAG, "Step 2: Probing MTU...")
                         val mtu = MtuProber.discover(prefs.serverAddress)
                         if (mtu > 0) {
                             prefs.mtu = mtu
-                            Log.d(TAG, "MTU probed: $mtu")
+                            Log.i(TAG, "Step 2: ✅ MTU probed: $mtu")
+                        } else {
+                            Log.w(TAG, "Step 2: ⚠️ MTU probe returned 0, using default ${prefs.mtu}")
                         }
+                    } else {
+                        Log.i(TAG, "Step 2: Auto-MTU disabled, using ${prefs.mtu}")
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "MTU probe failed (non-fatal): ${e.message}")
+                    Log.w(TAG, "Step 2: ⚠️ MTU probe failed (non-fatal): ${e.message}")
                 }
 
                 // Step 3: Resolve endpoint hostname BEFORE building config
+                Log.i(TAG, "Step 3: Resolving endpoint: ${prefs.serverAddress}:${prefs.serverPort}")
                 val resolvedEndpoint = resolveEndpoint(prefs.serverAddress, prefs.serverPort)
-                Log.d(TAG, "Endpoint resolved: ${prefs.serverAddress} -> $resolvedEndpoint")
+                Log.i(TAG, "Step 3: ✅ Endpoint resolved: $resolvedEndpoint")
 
                 // Step 4: Build WireGuard Config using proper API
+                Log.i(TAG, "Step 4: Building WireGuard config...")
+                Log.i(TAG, "  privateKey=${prefs.decodePrivateKeyBase64().take(8)}...")
+                Log.i(TAG, "  serverPubKey=${prefs.decodeServerPublicKeyBase64()}")
+                Log.i(TAG, "  tunnelAddress=${prefs.tunnelAddress}")
+                Log.i(TAG, "  mtu=${prefs.mtu}")
+                Log.i(TAG, "  dnsServers=${prefs.dnsServers}")
+                Log.i(TAG, "  allowedIps=${prefs.allowedIps}")
+                Log.i(TAG, "  endpoint=$resolvedEndpoint")
                 val config = buildWireGuardConfig(prefs, resolvedEndpoint)
-                    ?: throw Exception("Failed to build WireGuard config")
+                if (config == null) {
+                    Log.e(TAG, "Step 4: ❌ buildWireGuardConfig returned null!")
+                    throw Exception("Failed to build WireGuard config")
+                }
+                Log.i(TAG, "Step 4: ✅ Config built successfully")
 
                 // Step 5: Connect via GoBackend.setState()
-                // This handles: TUN establish, socket protect, wgTurnOn — all internally
-                Log.d(TAG, "Connecting via GoBackend.setState(UP)...")
+                Log.i(TAG, "Step 5: Calling GoBackend.setState(UP)...")
                 val currentBackend = backend ?: GoBackend(this@TunnelyVpnService)
                 currentBackend.setState(tunnel, Tunnel.State.UP, config)
                 backend = currentBackend
 
-                Log.i(TAG, "GoBackend.setState(UP) succeeded — VPN connected!")
+                Log.i(TAG, "Step 5: ✅ GoBackend.setState(UP) succeeded — VPN connected!")
 
                 // Step 6: Update state
                 _vpnState.value = VpnState.CONNECTED
@@ -289,33 +323,37 @@ class TunnelyVpnService : LifecycleService() {
 
     private fun buildWireGuardConfig(prefs: VpnPreferences, resolvedEndpoint: String): Config? {
         return try {
+            Log.i(TAG, "buildWireGuardConfig: Building interface...")
             // Build Interface
             val ifaceBuilder = com.wireguard.config.Interface.Builder()
                 .parsePrivateKey(prefs.decodePrivateKeyBase64())
                 .parseAddresses(prefs.tunnelAddress)
                 .parseMtu(prefs.mtu.toString())
                 .parseDnsServers(prefs.dnsServers)
+            Log.i(TAG, "  Interface: addr=${prefs.tunnelAddress}, mtu=${prefs.mtu}, dns=${prefs.dnsServers}")
 
             // Split tunneling: include only selected apps
             if (prefs.splitTunneling && prefs.splitApps.isNotEmpty()) {
                 for (packageName in prefs.splitApps) {
                     try {
                         ifaceBuilder.includeApplication(packageName)
-                        Log.d(TAG, "Split tunnel: included $packageName")
                     } catch (e: Exception) {
                         Log.w(TAG, "Failed to include $packageName: ${e.message}")
                     }
                 }
-                Log.i(TAG, "Split tunneling: ${prefs.splitApps.size} apps")
+                Log.i(TAG, "  Split tunneling: ${prefs.splitApps.size} apps")
             }
 
             val iface = ifaceBuilder.build()
+            Log.i(TAG, "  Interface built OK")
 
             // Build Peer
+            Log.i(TAG, "buildWireGuardConfig: Building peer...")
             val peerBuilder = com.wireguard.config.Peer.Builder()
                 .parsePublicKey(prefs.decodeServerPublicKeyBase64())
                 .parseEndpoint(resolvedEndpoint)
                 .parsePersistentKeepalive("25")
+            Log.i(TAG, "  Peer: pubkey=${prefs.decodeServerPublicKeyBase64()}, endpoint=$resolvedEndpoint, keepalive=25")
 
             // Add allowed IPs
             val allowedIpList = prefs.allowedIps.split(",")
@@ -323,16 +361,20 @@ class TunnelyVpnService : LifecycleService() {
                 .filter { it.isNotBlank() }
                 .map { InetNetwork.parse(it) }
             peerBuilder.addAllowedIps(allowedIpList)
+            Log.i(TAG, "  AllowedIPs: ${prefs.allowedIps}")
 
             val peer = peerBuilder.build()
+            Log.i(TAG, "  Peer built OK")
 
             // Build Config
-            Config.Builder()
+            val config = Config.Builder()
                 .setInterface(iface)
                 .addPeer(peer)
                 .build()
+            Log.i(TAG, "  ✅ Config built successfully")
+            config
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to build config: ${e.message}", e)
+            Log.e(TAG, "❌ buildWireGuardConfig failed: ${e.message}", e)
             null
         }
     }

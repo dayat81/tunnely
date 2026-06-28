@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tunnely — WireGuard Monitor</title>
+<style>
+  :root {
+    --bg: #0d1117; --card: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+    --green: #3fb950; --yellow: #d29922; --red: #f85149; --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 14px; }
+  .header { display: flex; align-items: center; justify-content: space-between; padding: 16px 24px; border-bottom: 1px solid var(--border); }
+  .header h1 { font-size: 20px; font-weight: 600; }
+  .header h1 span { color: var(--accent); }
+  .header .info { color: var(--muted); font-size: 12px; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 20px 24px; }
+  .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .stat-card .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+  .stat-card .value { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stat-card .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .stat-card.green .value { color: var(--green); }
+  .stat-card.yellow .value { color: var(--yellow); }
+  .stat-card.red .value { color: var(--red); }
+  .stat-card.blue .value { color: var(--accent); }
+  .stat-card.purple .value { color: var(--purple); }
+  .section-title { font-size: 14px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin: 20px 0 10px; }
+  .peer-table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .peer-table th { text-align: left; padding: 10px 12px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); background: rgba(0,0,0,0.2); }
+  .peer-table td { padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .peer-table tr:last-child td { border-bottom: none; }
+  .peer-table tr:hover { background: rgba(88,166,255,0.04); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+  .badge.connected { background: rgba(63,185,80,0.15); color: var(--green); }
+  .badge.stale { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .badge.disconnected { background: rgba(248,81,73,0.15); color: var(--red); }
+  .badge.never { background: rgba(139,148,158,0.15); color: var(--muted); }
+  .mono { font-family: 'SF Mono', SFMono-Regular, ui-monospace, monospace; font-size: 12px; }
+  .bytes { color: var(--accent); }
+  .bytes.tx { color: var(--purple); }
+  .right { text-align: right; }
+  .refresh-bar { display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .dot.error { background: var(--red); }
+  .filter-bar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .filter-btn { background: var(--card); border: 1px solid var(--border); color: var(--muted); padding: 4px 12px; border-radius: 16px; font-size: 12px; cursor: pointer; }
+  .filter-btn:hover, .filter-btn.active { border-color: var(--accent); color: var(--accent); }
+  .server-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .server-stat { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; }
+  .server-stat .label { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+  .server-stat .bar-bg { background: var(--border); border-radius: 4px; height: 6px; margin-top: 6px; overflow: hidden; }
+  .server-stat .bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s; }
+  .server-stat .bar-fill.green { background: var(--green); }
+  .server-stat .bar-fill.yellow { background: var(--yellow); }
+  .server-stat .bar-fill.red { background: var(--red); }
+  @media (max-width: 768px) {
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+    .peer-table { font-size: 12px; }
+    .peer-table th, .peer-table td { padding: 6px 8px; }
+    .container { padding: 12px; }
+  }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>🔒 <span>Tunnely</span> WireGuard Monitor</h1>
+  <div class="refresh-bar">
+    <div class="dot" id="statusDot"></div>
+    <span class="info" id="lastUpdate">Loading…</span>
+  </div>
+</div>
+<div class="container">
+  <div class="stats-grid" id="summaryCards"></div>
+  <div class="server-stats" id="serverStats"></div>
+  <div class="section-title">Peers</div>
+  <div class="filter-bar" id="filterBar">
+    <button class="filter-btn active" data-filter="all">All</button>
+    <button class="filter-btn" data-filter="connected">Connected</button>
+    <button class="filter-btn" data-filter="stale">Stale</button>
+    <button class="filter-btn" data-filter="disconnected">Disconnected</button>
+    <button class="filter-btn" data-filter="never">Never</button>
+  </div>
+  <table class="peer-table">
+    <thead><tr>
+      <th>#</th><th>Tunnel IP</th><th>Status</th><th>Endpoint</th>
+      <th class="right">↓ RX</th><th class="right">↑ TX</th><th>Last Handshake</th>
+    </tr></thead>
+    <tbody id="peerBody"></tbody>
+  </table>
+</div>
+<script>
+const API = '/api/wg/status';
+let currentFilter = 'all';
+let data = null;
+
+function fmtBytes(b) {
+  if (b === 0) return '0 B';
+  const units = ['B','KB','MB','GB','TB'];
+  const i = Math.floor(Math.log(b) / Math.log(1024));
+  return (b / Math.pow(1024, i)).toFixed(i > 1 ? 1 : 0) + ' ' + units[i];
+}
+function fmtAgo(s) {
+  if (s == null) return '—';
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  if (s < 86400) return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm ago';
+  return Math.floor(s/86400) + 'd ago';
+}
+function fmtUptime(s) {
+  const d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60);
+  return (d > 0 ? d+'d ' : '') + h + 'h ' + m + 'm';
+}
+
+function renderSummary(sum) {
+  const el = document.getElementById('summaryCards');
+  el.innerHTML = `
+    <div class="stat-card blue"><div class="label">Total Peers</div><div class="value">${sum.total}</div></div>
+    <div class="stat-card green"><div class="label">Connected</div><div class="value">${sum.connected}</div></div>
+    <div class="stat-card yellow"><div class="label">Stale</div><div class="value">${sum.stale}</div></div>
+    <div class="stat-card red"><div class="label">Disconnected</div><div class="value">${sum.disconnected}</div></div>
+    <div class="stat-card"><div class="label">Never Connected</div><div class="value">${sum.never}</div></div>
+    <div class="stat-card purple"><div class="label">Total Traffic</div><div class="value">${fmtBytes((sum.total_rx_mb+sum.total_tx_mb)*1024*1024)}</div><div class="sub">↓${fmtBytes(sum.total_rx_mb*1024*1024)} ↑${fmtBytes(sum.total_tx_mb*1024*1024)}</div></div>
+  `;
+}
+
+function renderServerStats(stats) {
+  const el = document.getElementById('serverStats');
+  const memPct = stats.mem_total_gb ? Math.round((1 - stats.mem_avail_gb/stats.mem_total_gb)*100) : 0;
+  const memColor = memPct > 80 ? 'red' : memPct > 60 ? 'yellow' : 'green';
+  el.innerHTML = `
+    <div class="server-stat"><div class="label">Uptime</div><div style="font-size:18px;font-weight:600;margin-top:4px">${fmtUptime(stats.uptime_s||0)}</div></div>
+    <div class="server-stat"><div class="label">Load Average</div><div style="font-size:18px;font-weight:600;margin-top:4px">${(stats.load||[0,0,0]).map(v=>v.toFixed(2)).join(' / ')}</div></div>
+    <div class="server-stat"><div class="label">Memory ${memPct}%</div><div style="font-size:14px;margin-top:4px">${stats.mem_avail_gb||0} GB free / ${stats.mem_total_gb||0} GB</div><div class="bar-bg"><div class="bar-fill ${memColor}" style="width:${memPct}%"></div></div></div>
+    <div class="server-stat"><div class="label">Conntrack</div><div style="font-size:18px;font-weight:600;margin-top:4px">${(stats.conntrack||0).toLocaleString()}</div></div>
+    <div class="server-stat"><div class="label">WG0 RX / TX</div><div style="font-size:14px;margin-top:4px" class="mono"><span class="bytes">↓${fmtBytes(stats.wg0_rx_bytes||0)}</span> / <span class="bytes tx">↑${fmtBytes(stats.wg0_tx_bytes||0)}</span></div></div>
+    <div class="server-stat"><div class="label">ens4 RX / TX</div><div style="font-size:14px;margin-top:4px" class="mono"><span class="bytes">↓${fmtBytes(stats.ens4_rx_bytes||0)}</span> / <span class="bytes tx">↑${fmtBytes(stats.ens4_tx_bytes||0)}</span></div></div>
+  `;
+}
+
+function renderPeers(peers) {
+  const tbody = document.getElementById('peerBody');
+  const filtered = currentFilter === 'all' ? peers : peers.filter(p => p.status === currentFilter);
+  if (filtered.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px">No peers match filter</td></tr>';
+    return;
+  }
+  tbody.innerHTML = filtered.map(p => `
+    <tr>
+      <td class="mono">${p.peer_id}</td>
+      <td class="mono">${p.tunnel_ip || '—'}</td>
+      <td><span class="badge ${p.status}">${p.status}</span></td>
+      <td class="mono">${p.endpoint_ip ? p.endpoint_ip+':'+p.endpoint_port : '—'}</td>
+      <td class="right mono bytes">${fmtBytes(p.rx_bytes)}</td>
+      <td class="right mono bytes tx">${fmtBytes(p.tx_bytes)}</td>
+      <td>${fmtAgo(p.ago)}</td>
+    </tr>
+  `).join('');
+}
+
+async function refresh() {
+  try {
+    const r = await fetch(API);
+    data = await r.json();
+    renderSummary(data.summary);
+    renderServerStats(data.server.stats);
+    renderPeers(data.peers);
+    document.getElementById('statusDot').className = 'dot';
+    document.getElementById('lastUpdate').textContent = 'Updated ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById('statusDot').className = 'dot error';
+    document.getElementById('lastUpdate').textContent = 'Error: ' + e.message;
+  }
+}
+
+document.getElementById('filterBar').addEventListener('click', e => {
+  if (!e.target.classList.contains('filter-btn')) return;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  e.target.classList.add('active');
+  currentFilter = e.target.dataset.filter;
+  if (data) renderPeers(data.peers);
+});
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
