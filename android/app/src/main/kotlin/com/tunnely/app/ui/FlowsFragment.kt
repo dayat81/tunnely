@@ -42,6 +42,11 @@ class FlowsFragment : Fragment() {
 
     private var flowMonitor: FlowMonitor? = null
 
+    // Rate calculation state — delta-based so it works when backgrounded
+    private var prevRxBytes: Long = -1
+    private var prevTxBytes: Long = -1
+    private var prevPollTimeMs: Long = 0
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -116,12 +121,23 @@ class FlowsFragment : Fragment() {
                                 while (UdpTunnelVpnService.vpnState.value == VpnState.CONNECTED) {
                                     val flows = PacketFlowTracker.getFlows()
                                     val stats = PacketFlowTracker.getAggregateStats()
+                                    val nowMs = System.currentTimeMillis()
+
+                                    // Compute rate from delta of total counters
+                                    // This works even when backgrounded because total counters
+                                    // continue to accumulate in the VPN I/O threads
+                                    val rxRate = FlowsFragment.computeRate(stats.wgRx, prevRxBytes, nowMs, prevPollTimeMs)
+                                    val txRate = FlowsFragment.computeRate(stats.wgTx, prevTxBytes, nowMs, prevPollTimeMs)
+                                    prevRxBytes = stats.wgRx
+                                    prevTxBytes = stats.wgTx
+                                    prevPollTimeMs = nowMs
+
                                     withContext(Dispatchers.Main) {
                                         adapter.submitList(flows)
                                         updateEmptyState(flows.isEmpty(), true)
-                                        statsRxRate.text = formatRate(0) // TODO: compute rate from delta
+                                        statsRxRate.text = formatRate(rxRate)
                                         statsRxTotal.text = formatBytes(stats.wgRx)
-                                        statsTxRate.text = formatRate(0)
+                                        statsTxRate.text = formatRate(txRate)
                                         statsTxTotal.text = formatBytes(stats.wgTx)
                                         statsFlows.text = "${stats.activeFlows}"
                                         statsFlowsTotal.text = "${stats.totalFlows} total"
@@ -135,6 +151,10 @@ class FlowsFragment : Fragment() {
                             adapter.submitList(emptyList())
                             updateEmptyState(false, false)
                             statsCard.visibility = View.GONE
+                            // Reset rate calculation state
+                            prevRxBytes = -1
+                            prevTxBytes = -1
+                            prevPollTimeMs = 0
                         }
                     }
                 }
@@ -171,6 +191,27 @@ class FlowsFragment : Fragment() {
             bytesPerSec < 1024 -> "$bytesPerSec B/s"
             bytesPerSec < 1024 * 1024 -> "${bytesPerSec / 1024} KB/s"
             else -> "${"%.1f".format(bytesPerSec / (1024.0 * 1024.0))} MB/s"
+        }
+    }
+
+    /**
+     * Compute throughput rate from delta of total counters.
+     * Works when app is backgrounded because counters accumulate in I/O threads.
+     *
+     * @param currentBytes Total bytes now
+     * @param prevBytes Total bytes at previous poll (-1 if first poll)
+     * @param nowMs Current time in ms
+     * @param prevMs Previous poll time in ms (0 if first poll)
+     * @return Bytes per second, or 0 if first poll / no time elapsed
+     */
+    companion object {
+        fun computeRate(currentBytes: Long, prevBytes: Long, nowMs: Long, prevMs: Long): Long {
+            if (prevBytes < 0 || prevMs == 0L) return 0  // first poll, no baseline
+            val dtMs = nowMs - prevMs
+            if (dtMs <= 0) return 0  // clock skew or same tick
+            val deltaBytes = currentBytes - prevBytes
+            if (deltaBytes < 0) return 0  // counter reset (reconnect)
+            return deltaBytes * 1000 / dtMs  // bytes/sec
         }
     }
 
