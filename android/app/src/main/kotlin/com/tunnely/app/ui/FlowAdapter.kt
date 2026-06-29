@@ -24,15 +24,18 @@ class FlowAdapter : ListAdapter<FlowEntry, FlowAdapter.FlowViewHolder>(FlowDiffC
 
     inner class FlowViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         private val serverText: TextView = itemView.findViewById(R.id.flow_server)
+        private val portText: TextView = itemView.findViewById(R.id.flow_port)
         private val protocolBadge: TextView = itemView.findViewById(R.id.flow_protocol)
         private val uplinkText: TextView = itemView.findViewById(R.id.flow_uplink)
         private val downlinkText: TextView = itemView.findViewById(R.id.flow_downlink)
 
         fun bind(entry: FlowEntry) {
-            serverText.text = entry.displayServer
-            protocolBadge.text = entry.protocol
+            // Split IP and port
+            serverText.text = entry.server
+            portText.text = ":${entry.port}"
 
-            // Set protocol badge color
+            // Protocol badge
+            protocolBadge.text = entry.protocol.uppercase()
             val badgeColor = if (entry.protocol.uppercase().startsWith("TCP")) {
                 itemView.context.getColor(R.color.protocol_tcp)
             } else {
@@ -46,7 +49,7 @@ class FlowAdapter : ListAdapter<FlowEntry, FlowAdapter.FlowViewHolder>(FlowDiffC
                 uplinkText.visibility = View.VISIBLE
                 downlinkText.visibility = View.VISIBLE
             } else {
-                // Local flows without byte counters — show as active connection
+                // Local flows without byte counters
                 uplinkText.text = "● active"
                 uplinkText.setTextColor(itemView.context.getColor(R.color.accent))
                 downlinkText.visibility = View.GONE
