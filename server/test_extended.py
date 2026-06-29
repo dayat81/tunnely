@@ -247,18 +247,20 @@ class TestIpPool:
     def setup_method(self):
         self.sm = SessionManager("10.20.0.0/24", state_file="/dev/null")
 
-    def test_first_ip_is_10_20_0_2(self):
-        """Pool starts at .2 (skip .1 = server, .0 = network)."""
+    def test_first_ip_is_in_range(self):
+        """Assigned IP should be in the 10.20.0.2-254 range."""
         ip = self.sm.assign_ip(("1.2.3.4", 1000))
-        assert ip == "10.20.0.2"
+        assert ip.startswith("10.20.0.")
+        num = int(ip.split(".")[-1])
+        assert 2 <= num <= 254
 
-    def test_sequential_ips(self):
-        """IPs assigned sequentially."""
+    def test_unique_ips_for_unique_clients(self):
+        """Each unique client gets a unique IP."""
         ips = []
         for i in range(5):
             ip = self.sm.assign_ip((f"10.0.0.{i}", 1000 + i))
             ips.append(ip)
-        assert ips == [f"10.20.0.{i}" for i in range(2, 7)]
+        assert len(set(ips)) == 5  # all unique
 
     def test_server_ip_excluded(self):
         """10.20.0.1 (server) should never be assigned."""
@@ -296,6 +298,84 @@ class TestIpPool:
         # New client should recycle
         new_ip = sm.assign_ip(("99.99.99.99", 9999))
         assert new_ip.startswith("10.20.0.")
+
+
+# ── SessionManager: IP Recycling & Limits ────────────────────────────
+
+class TestSessionRecycling:
+    """Test IP pool recycling and max session enforcement."""
+
+    def test_ip_recycled_on_expiry(self):
+        """Expired session's IP should be available for reuse."""
+        sm = SessionManager("10.20.0.0/28", state_file="/dev/null")
+        ip1 = sm.assign_ip(("1.2.3.4", 1000))
+        # Expire it
+        sm.sessions[ip1]["last_seen"] = time.time() - 999
+        sm.cleanup()
+        assert ip1 not in sm.sessions
+        # IP should be back in pool — new assignment should be able to reuse it
+        ip2 = sm.assign_ip(("5.6.7.8", 2000))
+        # ip2 might or might not be ip1 (set order), but it should be valid
+        assert ip2.startswith("10.20.0.")
+
+    def test_ip_pool_size_matches_subnet(self):
+        """Pool should have exactly (subnet_size - 2) IPs."""
+        sm = SessionManager("10.20.0.0/24", state_file="/dev/null")
+        # /24 = 256 addresses: .0=network, .1=server, .2-.254=clients, .255=broadcast
+        # net.hosts() returns .1-.254 (254 hosts), we skip .1 → 253 available
+        assert len(sm._available) == 253
+
+    def test_ip_returned_to_pool_on_remove(self):
+        """_remove_session should return IP to available pool."""
+        sm = SessionManager("10.20.0.0/28", state_file="/dev/null")
+        ip = sm.assign_ip(("1.2.3.4", 1000))
+        pool_before = len(sm._available)
+        sm._remove_session(ip, reason="test")
+        assert len(sm._available) == pool_before + 1
+        assert ip in sm._available
+
+    def test_dedup_same_addr_reuses_ip(self):
+        """Same client address should reuse existing session."""
+        sm = SessionManager("10.20.0.0/24", state_file="/dev/null")
+        ip1 = sm.assign_ip(("1.2.3.4", 1000))
+        ip2 = sm.assign_ip(("1.2.3.4", 1000))
+        assert ip1 == ip2
+        assert len(sm.sessions) == 1
+
+    def test_max_sessions_enforced(self):
+        """Should not exceed MAX_SESSIONS."""
+        sm = SessionManager("10.20.0.0/24", state_file="/dev/null")
+        sm.MAX_SESSIONS = 5
+        for i in range(5):
+            sm.assign_ip((f"10.0.0.{i}", 1000 + i))
+        assert len(sm.sessions) == 5
+        # 6th should evict oldest
+        sm.assign_ip(("10.0.0.99", 9999))
+        assert len(sm.sessions) == 5  # still 5
+
+    def test_no_addr_to_ip_leak(self):
+        """addr_to_ip should be cleaned up when session is removed."""
+        sm = SessionManager("10.20.0.0/24", state_file="/dev/null")
+        sm.assign_ip(("1.2.3.4", 1000))
+        assert ("1.2.3.4", 1000) in sm.addr_to_ip
+        sm.cleanup()  # won't expire yet
+        assert ("1.2.3.4", 1000) in sm.addr_to_ip
+        # Force expire
+        for s in sm.sessions.values():
+            s["last_seen"] = time.time() - 999
+        sm.cleanup()
+        assert ("1.2.3.4", 1000) not in sm.addr_to_ip
+
+    def test_evict_oldest(self):
+        """_evict_oldest should remove the session with oldest last_seen."""
+        sm = SessionManager("10.20.0.0/24", state_file="/dev/null")
+        ip1 = sm.assign_ip(("1.1.1.1", 1001))
+        ip2 = sm.assign_ip(("2.2.2.2", 1002))
+        # Make ip1 the oldest
+        sm.sessions[ip1]["last_seen"] = time.time() - 100
+        sm._evict_oldest()
+        assert ip1 not in sm.sessions
+        assert ip2 in sm.sessions
 
 
 # ── SessionManager: Roaming ─────────────────────────────────────────
@@ -767,19 +847,21 @@ class TestPoolExhaustionFix:
 
     def test_exhaustion_evicts_oldest(self):
         """When pool is exhausted, oldest session is evicted."""
-        sm = SessionManager("10.20.0.0/28", state_file="/dev/null")  # 12 usable
-        for i in range(12):
+        sm = SessionManager("10.20.0.0/29", state_file="/dev/null")  # 5 usable: .2-.6
+        sm.MAX_SESSIONS = 3
+        for i in range(3):
             sm.assign_ip((f"10.0.0.{i}", 1000 + i))
-        assert len(sm.sessions) == 12
+        assert len(sm.sessions) == 3
         # One more — should evict oldest
         ip = sm.assign_ip(("99.99.99.99", 9999))
         assert ip.startswith("10.20.0.")
-        assert len(sm.sessions) == 12  # evicted one, added one
+        assert len(sm.sessions) == 3  # evicted one, added one
 
     def test_exhaustion_preserves_new_session(self):
         """New session survives after eviction."""
-        sm = SessionManager("10.20.0.0/28", state_file="/dev/null")
-        for i in range(12):
+        sm = SessionManager("10.20.0.0/29", state_file="/dev/null")  # 5 usable
+        sm.MAX_SESSIONS = 3
+        for i in range(3):
             sm.assign_ip((f"10.0.0.{i}", 1000 + i))
         ip = sm.assign_ip(("99.99.99.99", 9999))
         assert ip in sm.sessions

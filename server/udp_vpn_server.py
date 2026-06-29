@@ -165,15 +165,27 @@ def teardown_nat(tun_name: str, iface: str = "ens4"):
 # ── Session Management ────────────────────────────────────────────────────
 
 class SessionManager:
-    """Manages client IP assignment and NAT mapping."""
+    """Manages client IP assignment and NAT mapping.
+    
+    Improvements over v3.6:
+    - IP pool uses a set (O(1) alloc/free) instead of iterator
+    - IPs are recycled immediately on session expiry
+    - Client dedup: same (ip,port) reuses existing session
+    - Max session limit prevents pool exhaustion
+    - Roaming: same IP but different port = update, not new session
+    """
+
+    MAX_SESSIONS = 50  # hard limit
 
     def __init__(self, network: str, state_file: str = STATE_FILE):
         net = ipaddress.ip_network(network, strict=False)
         self.network = net
-        # .1 = server, .2-.254 = clients
-        self.pool = list(net.hosts())[1:-1]  # skip .1 (server) and .255 (broadcast)
-        self.pool_iter = iter(self.pool)
-        # ip (str) → {addr: (ip, port), last_seen: float, rx: int, tx: int}
+        self.subnet_prefix = str(net.network_address)
+        # Available IPs: .2 through .254 (skip .1=server)
+        # net.hosts() already excludes .0 (network) and .255 (broadcast)
+        all_hosts = list(net.hosts())
+        self._available = set(str(ip) for ip in all_hosts[1:])  # skip .1 only
+        # ip (str) → {addr: (ip, port), last_seen: float, rx: int, tx: int, connected_at: float}
         self.sessions = {}
         # addr tuple → ip str (reverse lookup)
         self.addr_to_ip = {}
@@ -181,33 +193,28 @@ class SessionManager:
 
     def assign_ip(self, client_addr) -> str:
         """Assign or return existing IP for a client address."""
+        # Dedup: same client address → same IP
         if client_addr in self.addr_to_ip:
             ip = self.addr_to_ip[client_addr]
             self.sessions[ip]["last_seen"] = time.time()
             return ip
 
-        # Try to get an IP from the pool
-        try:
-            ip = str(next(self.pool_iter))
-        except StopIteration:
-            # Pool exhausted — try recycling expired sessions
+        # Enforce max sessions
+        if len(self.sessions) >= self.MAX_SESSIONS:
             self.cleanup()
-            self.pool_iter = iter(self.pool)
-            try:
-                ip = str(next(self.pool_iter))
-            except StopIteration:
-                # Still exhausted — force-expire the oldest session
-                if self.sessions:
-                    oldest_ip = min(self.sessions, key=lambda k: self.sessions[k]["last_seen"])
-                    old_addr = self.sessions[oldest_ip]["addr"]
-                    del self.sessions[oldest_ip]
-                    if old_addr in self.addr_to_ip:
-                        del self.addr_to_ip[old_addr]
-                    log(f"Pool exhausted — evicted oldest session {oldest_ip}", "WARN")
-                    self.pool_iter = iter(self.pool)
-                    ip = str(next(self.pool_iter))
-                else:
-                    raise RuntimeError("IP pool exhausted and no sessions to evict")
+            if len(self.sessions) >= self.MAX_SESSIONS:
+                self._evict_oldest()
+
+        # Get an IP from the pool
+        if not self._available:
+            self.cleanup()
+            if not self._available:
+                self._evict_oldest()
+
+        if not self._available:
+            raise RuntimeError("IP pool exhausted and no sessions to evict")
+
+        ip = self._available.pop()
 
         self.sessions[ip] = {
             "addr": client_addr,
@@ -243,20 +250,33 @@ class SessionManager:
             s["rx"] += rx_bytes
             s["tx"] += tx_bytes
 
+    def _evict_oldest(self):
+        """Force-expire the session with the oldest last_seen."""
+        if not self.sessions:
+            return
+        oldest_ip = min(self.sessions, key=lambda k: self.sessions[k]["last_seen"])
+        self._remove_session(oldest_ip, reason="evicted (oldest)")
+
+    def _remove_session(self, ip: str, reason: str = "expired"):
+        """Remove a session and return its IP to the pool."""
+        s = self.sessions.pop(ip, None)
+        if s:
+            addr = s["addr"]
+            if addr in self.addr_to_ip:
+                del self.addr_to_ip[addr]
+            duration = int(time.time() - s["connected_at"])
+            log(f"Session {reason}: {ip} ({addr[0]}:{addr[1]}) after {duration}s")
+        self._available.add(ip)
+
     def cleanup(self):
-        """Remove expired sessions."""
+        """Remove expired sessions and return IPs to pool."""
         now = time.time()
         expired = [
             ip for ip, s in self.sessions.items()
             if now - s["last_seen"] > IDLE_TIMEOUT
         ]
         for ip in expired:
-            addr = self.sessions[ip]["addr"]
-            duration = int(now - self.sessions[ip]["connected_at"])
-            log(f"Session expired: {ip} ({addr[0]}:{addr[1]}) after {duration}s")
-            del self.sessions[ip]
-            if addr in self.addr_to_ip:
-                del self.addr_to_ip[addr]
+            self._remove_session(ip, reason="expired")
 
     def stats(self) -> dict:
         # Iterate over a snapshot to avoid RuntimeError from concurrent modification
