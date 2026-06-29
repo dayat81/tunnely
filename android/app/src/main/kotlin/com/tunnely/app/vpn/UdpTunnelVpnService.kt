@@ -107,6 +107,8 @@ class UdpTunnelVpnService : VpnService() {
     private var upThread: Thread? = null     // UDP → TUN
     private var monitorThread: Thread? = null
     @Volatile private var running = false
+    private var serverAddr: InetAddress? = null
+    private var serverPort: Int = 0
 
     private var totalRx: Long = 0
     private var totalTx: Long = 0
@@ -160,13 +162,17 @@ class UdpTunnelVpnService : VpnService() {
         try {
             // Step 1: Resolve server address
             val serverHost = prefs.serverAddress
-            val serverPort = TUNNEL_PORT  // UDP tunnel always uses 5555
+            val srvPort = TUNNEL_PORT  // UDP tunnel always uses 5555
             RemoteLogger.i(TAG, "Step 1: Resolving $serverHost...")
-            val serverAddr = InetAddress.getByName(serverHost)
-            RemoteLogger.i(TAG, "Step 1: ✅ Resolved → ${serverAddr.hostAddress}")
+            val srvAddr = InetAddress.getByName(serverHost)
+            RemoteLogger.i(TAG, "Step 1: ✅ Resolved → ${srvAddr.hostAddress}")
+
+            // Store as class fields for keepalive
+            this.serverAddr = srvAddr
+            this.serverPort = srvPort
 
             // Step 2: Create UDP socket and PROTECT it (critical!)
-            RemoteLogger.i(TAG, "Step 2: Creating UDP socket to ${serverAddr.hostAddress}:$serverPort")
+            RemoteLogger.i(TAG, "Step 2: Creating UDP socket to ${srvAddr.hostAddress}:$srvPort")
             udpSocket = DatagramSocket()
             udpSocket!!.soTimeout = 5000
             // protect() prevents the UDP socket's traffic from going through the TUN
@@ -218,11 +224,11 @@ class UdpTunnelVpnService : VpnService() {
             // Step 4: Send initial keepalive so server learns our address
             RemoteLogger.i(TAG, "Step 4: Sending initial packet to register with server...")
             val hello = ByteBuffer.allocate(4).putInt(0x54554E4E).array() // "TUNN" magic
-            udpSocket!!.send(DatagramPacket(hello, hello.size, serverAddr, serverPort))
+            udpSocket!!.send(DatagramPacket(hello, hello.size, srvAddr, srvPort))
 
             // Step 5: Start I/O threads
             RemoteLogger.i(TAG, "Step 5: Starting I/O threads...")
-            startTunToUdpThread(serverAddr, serverPort)
+            startTunToUdpThread(srvAddr, srvPort)
             startUdpToTunThread()
             startMonitorThread()
 
@@ -230,7 +236,7 @@ class UdpTunnelVpnService : VpnService() {
             _vpnState.value = VpnState.CONNECTED
             lastPacketTime = System.currentTimeMillis()
             _connectionHealth.value = ConnectionHealth(
-                endpoint = "${serverAddr.hostAddress}:$serverPort"
+                endpoint = "${srvAddr.hostAddress}:$srvPort"
             )
             updateNotification("Connected ✓")
             RemoteLogger.i(TAG, "Step 6: ✅ VPN connected! Tunnel active.")
@@ -341,7 +347,7 @@ class UdpTunnelVpnService : VpnService() {
     private fun startMonitorThread() {
         monitorThread = Thread({
             RemoteLogger.i(TAG, "◉ Monitor thread started")
-            val keepaliveBuf = ByteBuffer.allocate(4).putInt(0x4B454550).array() // "KEEP"
+            val keepaliveBuf = ByteBuffer.allocate(4).putInt(0x54554E4E).array() // "TUNN" magic (same as hello)
 
             while (running && !Thread.interrupted()) {
                 try {
@@ -349,34 +355,34 @@ class UdpTunnelVpnService : VpnService() {
 
                     // Send keepalive to maintain NAT mapping
                     val sock = udpSocket
-                    val pfd = tunFd
-                    if (sock != null && pfd != null && running) {
+                    val addr = serverAddr
+                    val port = serverPort
+                    if (sock != null && addr != null && port > 0 && running) {
                         try {
-                            // Keepalive goes directly via UDP, NOT through TUN
-                            // We need server addr/port — reuse the connected socket
-                            // Since DatagramSocket isn't connected, we need explicit dest
-                            // This is handled by the downThread naturally sending data
-                        } catch (_: Exception) {}
-
-                        // Update traffic stats
-                        _trafficStats.value = TrafficStats(
-                            rxBytes = totalRx,
-                            txBytes = totalTx
-                        )
-
-                        // Update health
-                        val idleSecs = (System.currentTimeMillis() - lastPacketTime) / 1000
-                        val uptimeSecs = (System.currentTimeMillis() - connectTime) / 1000
-                        _connectionHealth.value = _connectionHealth.value.copy(
-                            handshakeAge = if (totalRx > 0 || totalTx > 0) idleSecs else -1,
-                            transferRx = totalRx,
-                            transferTx = totalTx
-                        )
-
-                        // Check for dead connection (no traffic for 60s)
-                        if (idleSecs > 60 && totalRx == 0L) {
-                            RemoteLogger.w(TAG, "No traffic for ${idleSecs}s, may be disconnected")
+                            sock.send(DatagramPacket(keepaliveBuf, keepaliveBuf.size, addr, port))
+                        } catch (e: Exception) {
+                            RemoteLogger.w(TAG, "Keepalive send failed: ${e.message}")
                         }
+                    }
+
+                    // Update traffic stats
+                    _trafficStats.value = TrafficStats(
+                        rxBytes = totalRx,
+                        txBytes = totalTx
+                    )
+
+                    // Update health
+                    val idleSecs = (System.currentTimeMillis() - lastPacketTime) / 1000
+                    val uptimeSecs = (System.currentTimeMillis() - connectTime) / 1000
+                    _connectionHealth.value = _connectionHealth.value.copy(
+                        handshakeAge = if (totalRx > 0 || totalTx > 0) idleSecs else -1,
+                        transferRx = totalRx,
+                        transferTx = totalTx
+                    )
+
+                    // Check for dead connection (no traffic for 60s)
+                    if (idleSecs > 60 && totalRx == 0L) {
+                        RemoteLogger.w(TAG, "No traffic for ${idleSecs}s, may be disconnected")
                     }
                 } catch (e: InterruptedException) {
                     break
@@ -411,6 +417,8 @@ class UdpTunnelVpnService : VpnService() {
         // Close UDP socket
         try { udpSocket?.close() } catch (_: Exception) {}
         udpSocket = null
+        serverAddr = null
+        serverPort = 0
 
         _vpnState.value = VpnState.DISCONNECTED
         _trafficStats.value = TrafficStats()

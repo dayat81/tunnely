@@ -467,6 +467,12 @@ class UdpVpnServer:
             self._forward_dns(data, dst_ip, assigned_ip, addr)
             return
 
+        # Periodic debug: log protocol breakdown
+        proto = data[9] if len(data) > 9 else -1
+        proto_name = {1: "ICMP", 6: "TCP", 17: "UDP"}.get(proto, f"P{proto}")
+        if self._should_debug_log():
+            log(f"  [RX] {assigned_ip}→{dst_ip} {proto_name} {len(data)}B")
+
         try:
             os.write(self.tun_fd, data)
         except OSError as e:
@@ -485,11 +491,27 @@ class UdpVpnServer:
 
         client_addr = self.sessions.get_addr_by_ip(dst_ip)
         if client_addr:
+            # Debug: log response packets
+            src_ip = extract_src_ip(data)
+            proto = data[9] if len(data) > 9 else -1
+            proto_name = {1: "ICMP", 6: "TCP", 17: "UDP"}.get(proto, f"P{proto}")
+            if self._should_debug_log():
+                log(f"  [TX] {src_ip}→{dst_ip} {proto_name} {len(data)}B")
+
             try:
                 self.sock.sendto(data, client_addr)
                 self.sessions.touch(dst_ip, tx_bytes=len(data))
             except socket.error as e:
                 log(f"UDP send error to {dst_ip}: {e}", "WARN")
+
+    _debug_counter = 0
+    def _should_debug_log(self) -> bool:
+        """Log every 50th packet to avoid spam."""
+        self._debug_counter += 1
+        if self._debug_counter >= 50:
+            self._debug_counter = 0
+            return True
+        return False
 
     def _forward_dns(self, packet: bytes, orig_dns_ip: str, client_ip: str, client_addr):
         """Forward DNS query to 8.8.8.8, track for response rewriting."""
