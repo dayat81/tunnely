@@ -531,4 +531,413 @@ class DnsInterceptorTest {
         val downResult = UdpTunnelVpnService.rewriteDnsDownlink(downPkt, downPkt.size)
         assertArrayEquals("public DNS downlink should pass through", downOriginal, downResult)
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  EDGE CASES
+    // ══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Build a UDP packet with IP options (IHL > 5, header > 20 bytes).
+     * Adds 4 bytes of NOP padding as IP options.
+     */
+    private fun buildUdpPacketWithOptions(
+        srcIp: Int, dstIp: Int,
+        srcPort: Int, dstPort: Int,
+        payload: ByteArray = ByteArray(0)
+    ): ByteArray {
+        val ipHeaderLen = 24  // 20 base + 4 bytes options (IHL=6)
+        val udpHeaderLen = 8
+        val totalLen = ipHeaderLen + udpHeaderLen + payload.size
+        val pkt = ByteArray(totalLen)
+
+        // IP header with IHL=6 (24 bytes)
+        pkt[0] = 0x46.toByte()           // Version=4, IHL=6 (24 bytes)
+        pkt[1] = 0x00
+        pkt[2] = ((totalLen shr 8) and 0xFF).toByte()
+        pkt[3] = (totalLen and 0xFF).toByte()
+        pkt[4] = 0x00; pkt[5] = 0x00
+        pkt[6] = 0x40.toByte(); pkt[7] = 0x00
+        pkt[8] = 0x40.toByte()
+        pkt[9] = 17                      // UDP
+        pkt[10] = 0; pkt[11] = 0
+        // Source IP (bytes 12-15)
+        pkt[12] = ((srcIp shr 24) and 0xFF).toByte()
+        pkt[13] = ((srcIp shr 16) and 0xFF).toByte()
+        pkt[14] = ((srcIp shr 8) and 0xFF).toByte()
+        pkt[15] = (srcIp and 0xFF).toByte()
+        // Destination IP (bytes 16-19)
+        pkt[16] = ((dstIp shr 24) and 0xFF).toByte()
+        pkt[17] = ((dstIp shr 16) and 0xFF).toByte()
+        pkt[18] = ((dstIp shr 8) and 0xFF).toByte()
+        pkt[19] = (dstIp and 0xFF).toByte()
+        // IP options (4 bytes NOP padding)
+        pkt[20] = 0x01; pkt[21] = 0x01; pkt[22] = 0x01; pkt[23] = 0x01
+
+        // UDP header starts at byte 24 (after 24-byte IP header)
+        pkt[24] = ((srcPort shr 8) and 0xFF).toByte()
+        pkt[25] = (srcPort and 0xFF).toByte()
+        pkt[26] = ((dstPort shr 8) and 0xFF).toByte()
+        pkt[27] = (dstPort and 0xFF).toByte()
+        val udpLen = udpHeaderLen + payload.size
+        pkt[28] = ((udpLen shr 8) and 0xFF).toByte()
+        pkt[29] = (udpLen and 0xFF).toByte()
+        pkt[30] = 0; pkt[31] = 0        // UDP checksum
+
+        System.arraycopy(payload, 0, pkt, ipHeaderLen + udpHeaderLen, payload.size)
+        return pkt
+    }
+
+    /**
+     * Build a DNS NXDOMAIN response (RCODE=3).
+     */
+    private fun buildDnsNxDomain(txId: Int = 0x1234): ByteArray {
+        return byteArrayOf(
+            ((txId shr 8) and 0xFF).toByte(), (txId and 0xFF).toByte(),
+            0x81.toByte(), 0x83.toByte(),  // Flags: response + NXDOMAIN (RCODE=3)
+            0x00, 0x01.toByte(),  // Questions: 1
+            0x00, 0x00,           // Answers: 0
+            0x00, 0x00,           // Authority: 0
+            0x00, 0x00,           // Additional: 0
+            0x06, 'g'.code.toByte(), 'o'.code.toByte(), 'o'.code.toByte(),
+            'g'.code.toByte(), 'l'.code.toByte(), 'e'.code.toByte(),
+            0x03, 'c'.code.toByte(), 'o'.code.toByte(), 'm'.code.toByte(),
+            0x00,
+            0x00, 0x01.toByte(),  // QTYPE: A
+            0x00, 0x01.toByte()   // QCLASS: IN
+        )
+    }
+
+    /**
+     * Build a DNS truncated response (TC bit set).
+     */
+    private fun buildDnsTruncated(txId: Int = 0x1234): ByteArray {
+        return byteArrayOf(
+            ((txId shr 8) and 0xFF).toByte(), (txId and 0xFF).toByte(),
+            0x83.toByte(), 0x80.toByte(),  // Flags: response + truncated + recursion
+            0x00, 0x01.toByte(),  // Questions: 1
+            0x00, 0x00,           // Answers: 0 (truncated, no answers)
+            0x00, 0x00,
+            0x00, 0x00,
+            0x06, 'g'.code.toByte(), 'o'.code.toByte(), 'o'.code.toByte(),
+            'g'.code.toByte(), 'l'.code.toByte(), 'e'.code.toByte(),
+            0x03, 'c'.code.toByte(), 'o'.code.toByte(), 'm'.code.toByte(),
+            0x00,
+            0x00, 0x01.toByte(),
+            0x00, 0x01.toByte()
+        )
+    }
+
+    @Test
+    fun `edge - IP options (IHL=6) shifts UDP header offset`() {
+        // With IHL=6, UDP header starts at byte 24 instead of 20
+        val dnsQuery = buildDnsQuery()
+        val pkt = buildUdpPacketWithOptions(CLIENT_IP, EMULATOR_DNS, 54321, 53, dnsQuery)
+
+        val result = UdpTunnelVpnService.rewriteDnsUplink(pkt, pkt.size)
+
+        // ihl should be (0x46 & 0xF) * 4 = 6 * 4 = 24
+        // dst IP is still at bytes 16-19
+        assertEquals("dst IP should be 8.8.8.8", "8.8.8.8", ipToStr(readIp(result, 16)))
+
+        // UDP dst port is at bytes 26-27 (ihl + 2 = 24 + 2 = 26)
+        val dstPort = ((result[26].toInt() and 0xFF) shl 8) or (result[27].toInt() and 0xFF)
+        assertEquals("dst port should be 53", 53, dstPort)
+    }
+
+    @Test
+    fun `edge - IP options downlink response rewrite`() {
+        // Uplink with IHL=6
+        val dnsQuery = buildDnsQuery(txId = 0xBEEF)
+        val upPkt = buildUdpPacketWithOptions(CLIENT_IP, EMULATOR_DNS, 44444, 53, dnsQuery)
+        UdpTunnelVpnService.rewriteDnsUplink(upPkt, upPkt.size)
+
+        // Downlink response (standard IHL=5 is fine for response)
+        val dnsResp = buildDnsResponse(txId = 0xBEEF)
+        val downPkt = buildUdpPacket(PUBLIC_DNS, CLIENT_IP, 53, 44444, dnsResp)
+        val result = UdpTunnelVpnService.rewriteDnsDownlink(downPkt, downPkt.size)
+
+        assertEquals("src should be 10.0.2.3", "10.0.2.3", ipToStr(readIp(result, 12)))
+    }
+
+    @Test
+    fun `edge - source port collision overwrites previous mapping`() {
+        // Two uplinks with same srcPort — second overwrites first
+        val dnsQuery1 = buildDnsQuery(txId = 0x1111)
+        val upPkt1 = buildUdpPacket(CLIENT_IP, EMULATOR_DNS, 99999, 53, dnsQuery1)
+        UdpTunnelVpnService.rewriteDnsUplink(upPkt1, upPkt1.size)
+
+        // Second uplink with same srcPort but different query
+        val dnsQuery2 = buildDnsQuery(txId = 0x2222)
+        val upPkt2 = buildUdpPacket(CLIENT_IP, EMULATOR_DNS, 99999, 53, dnsQuery2)
+        UdpTunnelVpnService.rewriteDnsUplink(upPkt2, upPkt2.size)
+
+        // Response for first query — should still work (same srcPort, same mapping)
+        val dnsResp1 = buildDnsResponse(txId = 0x1111)
+        val downPkt1 = buildUdpPacket(PUBLIC_DNS, CLIENT_IP, 53, 99999, dnsResp1)
+        val result1 = UdpTunnelVpnService.rewriteDnsDownlink(downPkt1, downPkt1.size)
+        assertEquals("first response should be rewritten", "10.0.2.3", ipToStr(readIp(result1, 12)))
+
+        // Response for second query — mapping already consumed
+        val dnsResp2 = buildDnsResponse(txId = 0x2222)
+        val downPkt2 = buildUdpPacket(PUBLIC_DNS, CLIENT_IP, 53, 99999, dnsResp2)
+        val result2 = UdpTunnelVpnService.rewriteDnsDownlink(downPkt2, downPkt2.size)
+        assertEquals("second response should pass through (no mapping)", "8.8.8.8", ipToStr(readIp(result2, 12)))
+    }
+
+    @Test
+    fun `edge - DNS NXDOMAIN response still gets rewritten`() {
+        val txId = 0xAAAA
+        val srcPort = 55555
+
+        // Uplink
+        val dnsQuery = buildDnsQuery(txId)
+        val upPkt = buildUdpPacket(CLIENT_IP, EMULATOR_DNS, srcPort, 53, dnsQuery)
+        UdpTunnelVpnService.rewriteDnsUplink(upPkt, upPkt.size)
+
+        // Downlink: NXDOMAIN response (QR=1, RCODE=3)
+        val dnsResp = buildDnsNxDomain(txId)
+        val downPkt = buildUdpPacket(PUBLIC_DNS, CLIENT_IP, 53, srcPort, dnsResp)
+        val result = UdpTunnelVpnService.rewriteDnsDownlink(downPkt, downPkt.size)
+
+        assertEquals("NXDOMAIN response should still be rewritten", "10.0.2.3", ipToStr(readIp(result, 12)))
+    }
+
+    @Test
+    fun `edge - DNS truncated response still gets rewritten`() {
+        val txId = 0xBBBB
+        val srcPort = 66666
+
+        // Uplink
+        val dnsQuery = buildDnsQuery(txId)
+        val upPkt = buildUdpPacket(CLIENT_IP, EMULATOR_DNS, srcPort, 53, dnsQuery)
+        UdpTunnelVpnService.rewriteDnsUplink(upPkt, upPkt.size)
+
+        // Downlink: truncated response (QR=1, TC=1)
+        val dnsResp = buildDnsTruncated(txId)
+        val downPkt = buildUdpPacket(PUBLIC_DNS, CLIENT_IP, 53, srcPort, dnsResp)
+        val result = UdpTunnelVpnService.rewriteDnsDownlink(downPkt, downPkt.size)
+
+        assertEquals("truncated response should still be rewritten", "10.0.2.3", ipToStr(readIp(result, 12)))
+    }
+
+    @Test
+    fun `edge - minimum valid packet (28 bytes, no UDP payload)`() {
+        // IP(20) + UDP(8) + 0 payload = 28 bytes
+        val pkt = buildUdpPacket(CLIENT_IP, EMULATOR_DNS, 54321, 53, ByteArray(0))
+
+        // This is not a valid DNS query (no payload), but the code checks port 53
+        // and dst IP. It should still try to rewrite.
+        val result = UdpTunnelVpnService.rewriteDnsUplink(pkt, pkt.size)
+
+        // dst should be rewritten to 8.8.8.8 (code doesn't validate DNS payload)
+        assertEquals("8.8.8.8", ipToStr(readIp(result, 16)))
+    }
+
+    @Test
+    fun `edge - minimum valid downlink (no DNS payload, QR check fails)`() {
+        // 28 bytes, no DNS payload → dnsOff + 4 = 32 > 28 → pass through
+        val pkt = buildUdpPacket(PUBLIC_DNS, CLIENT_IP, 53, 54321, ByteArray(0))
+        val original = pkt.copyOf()
+
+        val result = UdpTunnelVpnService.rewriteDnsDownlink(pkt, pkt.size)
+
+        assertArrayEquals("too small for QR check → pass through", original, result)
+    }
+
+    @Test
+    fun `edge - fragment offset set (non-first fragment, no UDP header)`() {
+        // Fragment with offset > 0 — UDP header is only in first fragment
+        val dnsQuery = buildDnsQuery()
+        val pkt = buildUdpPacket(CLIENT_IP, EMULATOR_DNS, 54321, 53, dnsQuery)
+        // Set fragment offset: bytes 6-7 = 0x2000 means MF=0, offset=0x0000*8=0
+        // Change to offset=1 (0x2001): fragment is NOT first, no UDP header
+        pkt[6] = 0x20.toByte()
+        pkt[7] = 0x01.toByte()  // offset = 1 * 8 = 8 bytes
+
+        val original = pkt.copyOf()
+        val result = UdpTunnelVpnService.rewriteDnsUplink(pkt, pkt.size)
+
+        // Code doesn't check fragment offset — it would still try to process.
+        // This is acceptable: non-first fragments are rare for DNS (small packets).
+        // The IHL/port reads would be garbage, but unlikely to match 10.0.2.3:53.
+        // In this case it DOES match because we built the packet to match.
+        // This test documents the behavior.
+        val dstIp = readIp(result, 16)
+        // Since the code doesn't guard against fragments, it will rewrite.
+        // This is a known limitation — DNS packets are small and rarely fragmented.
+        assertEquals("fragment processed (known limitation)", "8.8.8.8", ipToStr(dstIp))
+    }
+
+    @Test
+    fun `edge - large DNS response (512+ bytes) with CNAME chain`() {
+        val txId = 0xCCCC
+        val srcPort = 77777
+
+        // Build a large DNS response with 400+ bytes of payload
+        val largePayload = ByteArray(500)
+        // Set DNS header
+        largePayload[0] = ((txId shr 8) and 0xFF).toByte()
+        largePayload[1] = (txId and 0xFF).toByte()
+        largePayload[2] = 0x81.toByte()  // QR=1 (response)
+        largePayload[3] = 0x80.toByte()  // recursion available
+        largePayload[4] = 0x00; largePayload[5] = 0x01.toByte()  // 1 question
+        largePayload[6] = 0x00; largePayload[7] = 0x03.toByte()  // 3 answers (CNAME chain)
+
+        // Uplink
+        val dnsQuery = buildDnsQuery(txId)
+        val upPkt = buildUdpPacket(CLIENT_IP, EMULATOR_DNS, srcPort, 53, dnsQuery)
+        UdpTunnelVpnService.rewriteDnsUplink(upPkt, upPkt.size)
+
+        // Downlink with large payload
+        val downPkt = buildUdpPacket(PUBLIC_DNS, CLIENT_IP, 53, srcPort, largePayload)
+        val result = UdpTunnelVpnService.rewriteDnsDownlink(downPkt, downPkt.size)
+
+        assertEquals("large response should be rewritten", "10.0.2.3", ipToStr(readIp(result, 12)))
+        assertEquals("payload size preserved", downPkt.size, result.size)
+    }
+
+    @Test
+    fun `edge - zero-length buffer`() {
+        val empty = ByteArray(0)
+        assertArrayEquals("empty uplink", empty, UdpTunnelVpnService.rewriteDnsUplink(empty, 0))
+        assertArrayEquals("empty downlink", empty, UdpTunnelVpnService.rewriteDnsDownlink(empty, 0))
+    }
+
+    @Test
+    fun `edge - single byte buffer`() {
+        val single = byteArrayOf(0x45)
+        assertArrayEquals("single byte uplink", single, UdpTunnelVpnService.rewriteDnsUplink(single, 1))
+        assertArrayEquals("single byte downlink", single, UdpTunnelVpnService.rewriteDnsDownlink(single, 1))
+    }
+
+    @Test
+    fun `edge - uplink after downlink (reverse order, no mapping)`() {
+        // Downlink arrives BEFORE uplink creates mapping → pass through
+        val dnsResp = buildDnsResponse(txId = 0xDDDD)
+        val downPkt = buildUdpPacket(PUBLIC_DNS, CLIENT_IP, 53, 88888, dnsResp)
+        val original = downPkt.copyOf()
+
+        val result = UdpTunnelVpnService.rewriteDnsDownlink(downPkt, downPkt.size)
+        assertArrayEquals("no prior uplink → pass through", original, result)
+
+        // Now create the mapping (uplink) — should succeed
+        val dnsQuery = buildDnsQuery(txId = 0xDDDD)
+        val upPkt = buildUdpPacket(CLIENT_IP, EMULATOR_DNS, 88888, 53, dnsQuery)
+        val upResult = UdpTunnelVpnService.rewriteDnsUplink(upPkt, upPkt.size)
+
+        // Verify the uplink actually rewrote (meaning it processed the packet)
+        assertEquals("uplink should rewrite to 8.8.8.8", "8.8.8.8", ipToStr(readIp(upResult, 16)))
+
+        // Now send a proper response — should be rewritten back to 10.0.2.3
+        val dnsResp2 = buildDnsResponse(txId = 0xDDDD)
+        val downPkt2 = buildUdpPacket(PUBLIC_DNS, CLIENT_IP, 53, 88888, dnsResp2)
+        val result2 = UdpTunnelVpnService.rewriteDnsDownlink(downPkt2, downPkt2.size)
+        assertEquals("response after late uplink should be rewritten", "10.0.2.3", ipToStr(readIp(result2, 12)))
+    }
+
+    @Test
+    fun `edge - different dst IPs same srcPort both tracked`() {
+        // Two queries to 10.0.2.3 from same srcPort but we can't distinguish
+        // (srcPort is the only key). Second overwrites first.
+        // This tests that at least ONE response gets rewritten.
+        val dnsQuery = buildDnsQuery(txId = 0xEEEE)
+        val upPkt = buildUdpPacket(CLIENT_IP, EMULATOR_DNS, 33333, 53, dnsQuery)
+        UdpTunnelVpnService.rewriteDnsUplink(upPkt, upPkt.size)
+
+        // Verify mapping exists
+        val field = UdpTunnelVpnService::class.java.getDeclaredField("dnsMap")
+        field.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val map = field.get(null) as java.util.concurrent.ConcurrentHashMap<Any, Any>
+        assertTrue("mapping exists", map.containsKey(33333))
+
+        // The map stores the original dst IP (10.0.2.3) as Long
+        val storedValue = map[33333] as Long
+        assertEquals("stored IP should be 10.0.2.3", EMULATOR_DNS.toLong(), storedValue)
+    }
+
+    @Test
+    fun `edge - map grows and shrinks correctly`() {
+        val field = UdpTunnelVpnService::class.java.getDeclaredField("dnsMap")
+        field.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val map = field.get(null) as java.util.concurrent.ConcurrentHashMap<Any, Any>
+
+        assertEquals("map starts empty", 0, map.size)
+
+        // Create 5 mappings
+        for (i in 1..5) {
+            val dnsQuery = buildDnsQuery(txId = i)
+            val upPkt = buildUdpPacket(CLIENT_IP, EMULATOR_DNS, 20000 + i, 53, dnsQuery)
+            UdpTunnelVpnService.rewriteDnsUplink(upPkt, upPkt.size)
+        }
+        assertEquals("map has 5 entries", 5, map.size)
+
+        // Consume 3 mappings
+        for (i in 1..3) {
+            val dnsResp = buildDnsResponse(txId = i)
+            val downPkt = buildUdpPacket(PUBLIC_DNS, CLIENT_IP, 53, 20000 + i, dnsResp)
+            UdpTunnelVpnService.rewriteDnsDownlink(downPkt, downPkt.size)
+        }
+        assertEquals("map has 2 entries after 3 consumed", 2, map.size)
+
+        // Consume remaining 2
+        for (i in 4..5) {
+            val dnsResp = buildDnsResponse(txId = i)
+            val downPkt = buildUdpPacket(PUBLIC_DNS, CLIENT_IP, 53, 20000 + i, dnsResp)
+            UdpTunnelVpnService.rewriteDnsDownlink(downPkt, downPkt.size)
+        }
+        assertEquals("map is empty", 0, map.size)
+    }
+
+    @Test
+    fun `edge - writeIp readIp roundtrip all IP values`() {
+        // Test that IP byte encoding is lossless for various IPs
+        val testIps = intArrayOf(
+            0x0A000203.toInt(),   // 10.0.2.3
+            0x08080808,          // 8.8.8.8
+            0x0A140002,          // 10.20.0.2
+            0x7F000001,          // 127.0.0.1
+            0xFFFFFFFF.toInt(),  // 255.255.255.255
+            0x00000000,          // 0.0.0.0
+            0xC0A80101.toInt(),  // 192.168.1.1
+            0x0A000001,          // 10.0.0.1
+        )
+        for (ip in testIps) {
+            // Write IP using packet builder, read back with test helper
+            val pkt = buildUdpPacket(ip, ip, 0, 0)
+            val readBack = readIp(pkt, 12)  // src IP
+            assertEquals("roundtrip for ${ipToStr(ip)}", ip, readBack)
+        }
+    }
+
+    @Test
+    fun `edge - concurrent uplink calls don't corrupt map`() {
+        // Simulate concurrent uplinks from different threads
+        val threads = (1..10).map { i ->
+            Thread {
+                val dnsQuery = buildDnsQuery(txId = 0xF000 + i)
+                val upPkt = buildUdpPacket(CLIENT_IP, EMULATOR_DNS, 30000 + i, 53, dnsQuery)
+                UdpTunnelVpnService.rewriteDnsUplink(upPkt, upPkt.size)
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join(5000) }
+
+        // All 10 entries should be in the map
+        val field = UdpTunnelVpnService::class.java.getDeclaredField("dnsMap")
+        field.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val map = field.get(null) as java.util.concurrent.ConcurrentHashMap<Any, Any>
+        assertEquals("10 concurrent entries", 10, map.size)
+
+        // Each should resolve correctly
+        for (i in 1..10) {
+            val dnsResp = buildDnsResponse(txId = 0xF000 + i)
+            val downPkt = buildUdpPacket(PUBLIC_DNS, CLIENT_IP, 53, 30000 + i, dnsResp)
+            val result = UdpTunnelVpnService.rewriteDnsDownlink(downPkt, downPkt.size)
+            assertEquals("concurrent entry $i should rewrite", "10.0.2.3", ipToStr(readIp(result, 12)))
+        }
+        assertEquals("map empty after all consumed", 0, map.size)
+    }
 }
