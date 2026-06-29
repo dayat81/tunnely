@@ -58,6 +58,148 @@ class UdpTunnelVpnService : VpnService() {
         private const val KEEPALIVE_INTERVAL = 15_000L // 15s
         private const val MAX_PACKET = 32767
 
+        // DNS interceptor: rewrite private DNS IPs (10.0.2.3, etc.) to 8.8.8.8
+        // so DNS queries don't die in the tunnel. On response, rewrite source back.
+        private const val PUBLIC_DNS = 0x08080808  // 8.8.8.8
+        private val dnsRewriteMap = java.util.concurrent.ConcurrentHashMap<Int, Int>()  // dstPort → originalDnsIp
+
+        private fun isPrivateIp(ip: Int): Boolean {
+            val b0 = (ip shr 24) and 0xFF
+            val b1 = (ip shr 16) and 0xFF
+            return b0 == 10 ||                                          // 10.0.0.0/8
+                   (b0 == 172 && b1 in 16..31) ||                       // 172.16.0.0/12
+                   (b0 == 192 && b1 == 168) ||                           // 192.168.0.0/16
+                   (b0 == 169 && b1 == 254) ||                           // 169.254.0.0/16 (link-local)
+                   (b0 == 100 && b1 in 64..127)                          // 100.64.0.0/10 (CGNAT)
+        }
+
+        /** Rewrite DNS query dst from private IP to 8.8.8.8. Returns modified packet. */
+        fun rewriteDnsUplink(pkt: ByteArray, len: Int): ByteArray {
+            if (len < 28) return pkt  // min IPv4 + UDP header
+            val ver = (pkt[0].toInt() ushr 4) and 0xF
+            if (ver != 4) return pkt
+            val ihl = (pkt[0].toInt() and 0xF) * 4
+            val proto = pkt[9].toInt() and 0xFF
+            if (proto != 17) return pkt  // UDP only
+            if (len < ihl + 8) return pkt
+
+            val dstPort = ((pkt[ihl + 2].toInt() and 0xFF) shl 8) or (pkt[ihl + 3].toInt() and 0xFF)
+            if (dstPort != 53) return pkt  // not DNS
+
+            // Read dst IP
+            val dstIp = ((pkt[16].toInt() and 0xFF) shl 24) or
+                        ((pkt[17].toInt() and 0xFF) shl 16) or
+                        ((pkt[18].toInt() and 0xFF) shl 8) or
+                        (pkt[19].toInt() and 0xFF)
+
+            if (!isPrivateIp(dstIp)) return pkt  // already public, no rewrite needed
+
+            // Read src port for tracking
+            val srcPort = ((pkt[ihl].toInt() and 0xFF) shl 8) or (pkt[ihl + 1].toInt() and 0xFF)
+
+            // Save mapping: srcPort → original dst IP
+            dnsRewriteMap[srcPort] = dstIp
+
+            // Rewrite dst IP to 8.8.8.8
+            val result = pkt.copyOf(len)
+            result[16] = 8; result[17] = 8; result[18] = 8; result[19] = 8
+
+            // Fix IP checksum
+            fixIpChecksum(result, ihl)
+
+            // Fix UDP checksum (incremental: dst IP changed)
+            val udpCksumOff = ihl + 6
+            incrementalCksum(result, udpCksumOff, 16, dstIp, PUBLIC_DNS)  // dst at offset 16
+
+            RemoteLogger.i("DnsInterceptor", "Rewrote DNS query: ${ipToStr(dstIp)}:$dstPort → 8.8.8.8:$dstPort (srcPort=$srcPort)")
+            return result
+        }
+
+        /** Rewrite DNS response src from 8.8.8.8 back to original private DNS IP. */
+        fun rewriteDnsDownlink(pkt: ByteArray, len: Int): ByteArray {
+            if (len < 28) return pkt
+            val ver = (pkt[0].toInt() ushr 4) and 0xF
+            if (ver != 4) return pkt
+            val ihl = (pkt[0].toInt() and 0xF) * 4
+            val proto = pkt[9].toInt() and 0xFF
+            if (proto != 17) return pkt
+            if (len < ihl + 8) return pkt
+
+            val srcPort = ((pkt[ihl].toInt() and 0xFF) shl 8) or (pkt[ihl + 1].toInt() and 0xFF)
+            if (srcPort != 53) return pkt  // not DNS response
+
+            // Read src IP (should be 8.8.8.8 after NAT)
+            val srcIp = ((pkt[12].toInt() and 0xFF) shl 24) or
+                        ((pkt[13].toInt() and 0xFF) shl 16) or
+                        ((pkt[14].toInt() and 0xFF) shl 8) or
+                        (pkt[15].toInt() and 0xFF)
+
+            // Read dst port to look up mapping
+            val dstPort = ((pkt[ihl + 2].toInt() and 0xFF) shl 8) or (pkt[ihl + 3].toInt() and 0xFF)
+
+            val originalDnsIp = dnsRewriteMap.remove(dstPort) ?: return pkt  // no mapping, pass through
+
+            // Only rewrite if src is currently 8.8.8.8 (or any public DNS we rewrote to)
+            val result = pkt.copyOf(len)
+            result[12] = ((originalDnsIp shr 24) and 0xFF).toByte()
+            result[13] = ((originalDnsIp shr 16) and 0xFF).toByte()
+            result[14] = ((originalDnsIp shr 8) and 0xFF).toByte()
+            result[15] = (originalDnsIp and 0xFF).toByte()
+
+            // Fix IP checksum
+            fixIpChecksum(result, ihl)
+
+            // Fix UDP checksum (incremental: src IP changed)
+            val udpCksumOff = ihl + 6
+            incrementalCksum(result, udpCksumOff, 12, srcIp, originalDnsIp)  // src at offset 12
+
+            RemoteLogger.i("DnsInterceptor", "Rewrote DNS response: 8.8.8.8:53 → ${ipToStr(originalDnsIp)}:53 (dstPort=$dstPort)")
+            return result
+        }
+
+        private fun ipToStr(ip: Int): String =
+            "${(ip shr 24) and 0xFF}.${(ip shr 16) and 0xFF}.${(ip shr 8) and 0xFF}.${ip and 0xFF}"
+
+        private fun fixIpChecksum(pkt: ByteArray, ihl: Int) {
+            pkt[10] = 0; pkt[11] = 0  // clear existing checksum
+            var sum = 0
+            for (i in 0 until ihl step 2) {
+                sum += ((pkt[i].toInt() and 0xFF) shl 8) or (pkt[i + 1].toInt() and 0xFF)
+            }
+            while (sum ushr 16 != 0) sum = (sum and 0xFFFF) + (sum ushr 16)
+            val cksum = sum.inv() and 0xFFFF
+            pkt[10] = (cksum shr 8).toByte()
+            pkt[11] = (cksum and 0xFF).toByte()
+        }
+
+        /** RFC 1624 incremental checksum: update checksum when a 32-bit field changes. */
+        private fun incrementalCksum(pkt: ByteArray, cksumOff: Int, fieldOff: Int, oldVal: Int, newVal: Int) {
+            val cksum = ((pkt[cksumOff].toInt() and 0xFF) shl 8) or (pkt[cksumOff + 1].toInt() and 0xFF)
+            if (cksum == 0) return  // UDP checksum 0 = no checksum
+
+            // HC' = ~(~HC + ~m + m')  (RFC 1624)
+            var s = cksum.inv() and 0xFFFF
+
+            // ~m (old value, complemented)
+            val oldHi = (oldVal shr 16) and 0xFFFF
+            val oldLo = oldVal and 0xFFFF
+            s += oldHi.inv() and 0xFFFF
+            s += oldLo.inv() and 0xFFFF
+
+            // m' (new value)
+            val newHi = (newVal shr 16) and 0xFFFF
+            val newLo = newVal and 0xFFFF
+            s += newHi
+            s += newLo
+
+            // Fold carries
+            while (s ushr 16 != 0) s = (s and 0xFFFF) + (s ushr 16)
+            val newCksum = s.inv() and 0xFFFF
+
+            pkt[cksumOff] = (newCksum shr 8).toByte()
+            pkt[cksumOff + 1] = (newCksum and 0xFF).toByte()
+        }
+
         // Shared state (same interface as old TunnelyVpnService for UI compat)
         private val _vpnState = MutableStateFlow(VpnState.DISCONNECTED)
         val vpnState: StateFlow<VpnState> = _vpnState.asStateFlow()
@@ -259,11 +401,15 @@ class UdpTunnelVpnService : VpnService() {
                     val n = input.read(buf)
                     if (n <= 0) continue
 
-                    // Send raw IP packet to server
-                    // Track flow
-                    PacketFlowTracker.processPacket(buf.copyOf(n), isUplink = true)
+                    // DNS interceptor: rewrite private DNS (10.0.2.3 etc) → 8.8.8.8
+                    val sendBuf = rewriteDnsUplink(buf, n)
+                    val sendLen = sendBuf.size
 
-                    outPkt.length = n
+                    // Track flow
+                    PacketFlowTracker.processPacket(sendBuf.copyOf(sendLen), isUplink = true)
+
+                    outPkt.length = sendLen
+                    System.arraycopy(sendBuf, 0, outPkt.data, 0, sendLen)
                     sock.send(outPkt)
 
                     totalTx += n
@@ -304,11 +450,15 @@ class UdpTunnelVpnService : VpnService() {
                     val n = pkt.length
                     if (n <= 0) continue
 
+                    // DNS interceptor: rewrite 8.8.8.8 response back to original private DNS IP
+                    val recvBuf = rewriteDnsDownlink(buf, n)
+                    val recvLen = recvBuf.size
+
                     // Track flow
-                    PacketFlowTracker.processPacket(buf.copyOf(n), isUplink = false)
+                    PacketFlowTracker.processPacket(recvBuf.copyOf(recvLen), isUplink = false)
 
                     // Write raw IP packet to TUN
-                    output.write(buf, 0, n)
+                    output.write(recvBuf, 0, recvLen)
 
                     totalRx += n
                     lastPacketTime = System.currentTimeMillis()
