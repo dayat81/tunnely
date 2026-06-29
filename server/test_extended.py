@@ -873,6 +873,117 @@ class TestStatsSnapshot:
         assert s["active"] == 1
 
 
+# ── _rewrite_dst_ip Tests ────────────────────────────────────────────
+
+class TestRewriteDstIp:
+    """Test IP destination rewriting with checksum fix.
+    
+    This is the critical fix for TCP forwarding: server assigns 10.20.0.5 to a
+    client whose TUN is 10.20.0.2/32. Reply packets have dst=10.20.0.5 — the
+    server must rewrite dst back to 10.20.0.2 before sending to client.
+    """
+
+    def setup_method(self):
+        self.server = UdpVpnServer.__new__(UdpVpnServer)
+
+    def test_rewrite_dst_ip_udp(self):
+        """Rewriting dst IP in UDP packet should fix IP + UDP checksums."""
+        pkt = build_udp_packet(src_ip="8.8.8.8", dst_ip="10.20.0.5", checksum=0x1234)
+        rewritten = self.server._rewrite_dst_ip(pkt, "10.20.0.2")
+        assert extract_dst_ip(rewritten) == "10.20.0.2"
+        assert extract_src_ip(rewritten) == "8.8.8.8"  # src unchanged
+        ip_hdr = bytearray(rewritten[:20])
+        assert compute_ip_checksum(ip_hdr) == 0
+
+    def test_rewrite_dst_ip_tcp(self):
+        """Rewriting dst IP in TCP packet should fix IP + TCP checksums."""
+        pkt = build_tcp_packet(src_ip="91.108.56.140", dst_ip="10.20.0.5", dst_port=45330, flags=0x12)
+        rewritten = self.server._rewrite_dst_ip(pkt, "10.20.0.2")
+        assert extract_dst_ip(rewritten) == "10.20.0.2"
+        assert extract_src_ip(rewritten) == "91.108.56.140"
+        ip_hdr = bytearray(rewritten[:20])
+        assert compute_ip_checksum(ip_hdr) == 0
+
+    def test_rewrite_dst_ip_no_change(self):
+        """If new IP == old IP, packet should be unchanged."""
+        pkt = build_udp_packet(dst_ip="10.20.0.2")
+        rewritten = self.server._rewrite_dst_ip(pkt, "10.20.0.2")
+        assert rewritten == pkt
+
+    def test_rewrite_dst_ip_preserves_src(self):
+        """Source IP should not change."""
+        pkt = build_udp_packet(src_ip="74.125.200.101", dst_ip="10.20.0.5")
+        rewritten = self.server._rewrite_dst_ip(pkt, "10.20.0.2")
+        assert extract_src_ip(rewritten) == "74.125.200.101"
+
+    def test_rewrite_dst_ip_preserves_payload(self):
+        """Payload should be preserved after rewrite."""
+        payload = b"SYN-ACK data here"
+        pkt = build_udp_packet(src_ip="8.8.8.8", dst_ip="10.20.0.5", payload=payload)
+        rewritten = self.server._rewrite_dst_ip(pkt, "10.20.0.2")
+        assert rewritten[28:] == payload
+
+    def test_rewrite_dst_ip_icmp(self):
+        """ICMP packets should have IP checksum fixed only."""
+        pkt = build_ip_packet(src_ip="8.8.8.8", dst_ip="10.20.0.5", protocol=1,
+                              payload=b"\x00\x00" + b"\x00" * 18)
+        rewritten = self.server._rewrite_dst_ip(pkt, "10.20.0.2")
+        assert extract_dst_ip(rewritten) == "10.20.0.2"
+        ip_hdr = bytearray(rewritten[:20])
+        assert compute_ip_checksum(ip_hdr) == 0
+
+    def test_rewrite_dst_ip_short_packet_no_crash(self):
+        """Packet shorter than 20 bytes handled gracefully."""
+        pkt = b"\x45" + b"\x00" * 15
+        rewritten = self.server._rewrite_dst_ip(pkt, "10.20.0.2")
+        assert len(rewritten) == len(pkt)
+
+    def test_rewrite_dst_ip_multiple_times(self):
+        """Multiple rewrites should produce valid checksums each time."""
+        pkt = build_udp_packet(src_ip="8.8.8.8", dst_ip="10.20.0.5", checksum=0x5678)
+        for new_ip in ["10.20.0.4", "10.20.0.3", "10.20.0.2"]:
+            pkt = self.server._rewrite_dst_ip(pkt, new_ip)
+            assert extract_dst_ip(pkt) == new_ip
+            ip_hdr = bytearray(pkt[:20])
+            assert compute_ip_checksum(ip_hdr) == 0
+
+    def test_roundtrip_src_then_dst_rewrite(self):
+        """Simulate the full VPN flow: rewrite src on outbound, dst on inbound.
+        
+        1. Client sends SYN with src=10.20.0.2 → server rewrites src to 10.20.0.5
+        2. Reply SYN-ACK has dst=10.20.0.5 → server rewrites dst to 10.20.0.2
+        3. Final packet should have correct IPs and checksums
+        """
+        # Step 1: Client SYN (src=10.20.0.2 → dst=91.108.56.140)
+        syn = build_tcp_packet(src_ip="10.20.0.2", dst_ip="91.108.56.140",
+                               src_port=45330, dst_port=443, flags=0x02)
+        # Server rewrites src to assigned IP
+        syn_rewritten = self.server._rewrite_src_ip(syn, "10.20.0.5")
+        assert extract_src_ip(syn_rewritten) == "10.20.0.5"
+
+        # Step 2: SYN-ACK reply (src=91.108.56.140 → dst=10.20.0.5)
+        syn_ack = build_tcp_packet(src_ip="91.108.56.140", dst_ip="10.20.0.5",
+                                   src_port=443, dst_port=45330, flags=0x12)
+        # Server rewrites dst back to client TUN IP
+        syn_ack_fixed = self.server._rewrite_dst_ip(syn_ack, "10.20.0.2")
+        assert extract_dst_ip(syn_ack_fixed) == "10.20.0.2"
+        assert extract_src_ip(syn_ack_fixed) == "91.108.56.140"
+        # Both checksums valid
+        ip_hdr = bytearray(syn_ack_fixed[:20])
+        assert compute_ip_checksum(ip_hdr) == 0
+
+    def test_roundtrip_preserves_tcp_port_mapping(self):
+        """After roundtrip, TCP ports must be intact for connection tracking."""
+        pkt = build_tcp_packet(src_ip="91.108.56.140", dst_ip="10.20.0.5",
+                               src_port=443, dst_port=45330, flags=0x12)
+        rewritten = self.server._rewrite_dst_ip(pkt, "10.20.0.2")
+        ihl = (rewritten[0] & 0x0F) * 4
+        sport = (rewritten[ihl] << 8) | rewritten[ihl + 1]
+        dport = (rewritten[ihl + 2] << 8) | rewritten[ihl + 3]
+        assert sport == 443
+        assert dport == 45330
+
+
 # ── Run Tests ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

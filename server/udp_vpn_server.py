@@ -786,6 +786,9 @@ class UdpVpnServer:
         
         Used to rewrite reply packets from assigned IP back to client's TUN IP (10.20.0.2).
         """
+        if len(packet) < 20:
+            return packet  # too short to have a dst IP field
+
         pkt = bytearray(packet)
         new_ip_bytes = _aton(new_ip)
         old_dst = bytes(pkt[16:20])
