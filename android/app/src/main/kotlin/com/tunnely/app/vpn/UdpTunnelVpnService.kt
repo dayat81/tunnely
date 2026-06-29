@@ -197,14 +197,23 @@ class UdpTunnelVpnService : VpnService() {
 
             // Split tunneling
             if (prefs.splitTunneling && prefs.splitApps.isNotEmpty()) {
+                // Always exclude ourselves to prevent routing loop
+                try {
+                    builder.addDisallowedApplication(packageName)
+                } catch (_: Exception) {}
+                
+                // Use DISALLOW list (exclude selected apps) instead of ALLOW list
+                // addAllowedApplication() is unreliable for TCP on many Android devices
+                // addDisallowedApplication() is more reliable — all traffic goes through
+                // VPN EXCEPT excluded apps
                 for (pkg in prefs.splitApps) {
                     try {
-                        builder.addAllowedApplication(pkg)
+                        builder.addDisallowedApplication(pkg)
                     } catch (e: Exception) {
-                        RemoteLogger.w(TAG, "  Failed to add $pkg: ${e.message}")
+                        RemoteLogger.w(TAG, "  Failed to exclude $pkg: ${e.message}")
                     }
                 }
-                RemoteLogger.i(TAG, "  Split tunneling: ${prefs.splitApps.size} apps")
+                RemoteLogger.i(TAG, "  Split tunneling: excluding ${prefs.splitApps.size} apps")
             }
 
             builder.setConfigureIntent(
