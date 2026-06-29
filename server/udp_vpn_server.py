@@ -174,21 +174,33 @@ class SessionManager:
 
     def assign_ip(self, client_addr) -> str:
         """Assign or return existing IP for a client address."""
-        # Check if already registered by addr
         if client_addr in self.addr_to_ip:
             ip = self.addr_to_ip[client_addr]
             self.sessions[ip]["last_seen"] = time.time()
             return ip
 
-        # Check state file for re-registration (same addr, different port = roaming)
-        # Assign new IP
+        # Try to get an IP from the pool
         try:
             ip = str(next(self.pool_iter))
         except StopIteration:
-            # Recycle expired IPs
+            # Pool exhausted — try recycling expired sessions
             self.cleanup()
             self.pool_iter = iter(self.pool)
-            ip = str(next(self.pool_iter))
+            try:
+                ip = str(next(self.pool_iter))
+            except StopIteration:
+                # Still exhausted — force-expire the oldest session
+                if self.sessions:
+                    oldest_ip = min(self.sessions, key=lambda k: self.sessions[k]["last_seen"])
+                    old_addr = self.sessions[oldest_ip]["addr"]
+                    del self.sessions[oldest_ip]
+                    if old_addr in self.addr_to_ip:
+                        del self.addr_to_ip[old_addr]
+                    log(f"Pool exhausted — evicted oldest session {oldest_ip}", "WARN")
+                    self.pool_iter = iter(self.pool)
+                    ip = str(next(self.pool_iter))
+                else:
+                    raise RuntimeError("IP pool exhausted and no sessions to evict")
 
         self.sessions[ip] = {
             "addr": client_addr,
@@ -240,10 +252,12 @@ class SessionManager:
                 del self.addr_to_ip[addr]
 
     def stats(self) -> dict:
-        total_rx = sum(s["rx"] for s in self.sessions.values())
-        total_tx = sum(s["tx"] for s in self.sessions.values())
+        # Iterate over a snapshot to avoid RuntimeError from concurrent modification
+        snapshot = dict(self.sessions)
+        total_rx = sum(s["rx"] for s in snapshot.values())
+        total_tx = sum(s["tx"] for s in snapshot.values())
         return {
-            "active": len(self.sessions),
+            "active": len(snapshot),
             "total_rx": total_rx,
             "total_tx": total_tx,
             "sessions": {
@@ -253,7 +267,7 @@ class SessionManager:
                     "tx": s["tx"],
                     "idle": int(time.time() - s["last_seen"]),
                 }
-                for ip, s in self.sessions.items()
+                for ip, s in snapshot.items()
             },
         }
 
@@ -286,6 +300,8 @@ def extract_dst_ip(packet: bytes) -> str | None:
 def extract_src_ip(packet: bytes) -> str | None:
     """Extract source IPv4 address from raw IP packet."""
     if len(packet) < 20:
+        return None
+    if (packet[0] >> 4) != 4:  # Not IPv4
         return None
     return str(ipaddress.IPv4Address(packet[12:16]))
 
@@ -336,6 +352,8 @@ class UdpVpnServer:
         self.start_time = time.time()
         self.last_stats = 0
         self.last_save = 0
+        self._last_stats_rx = 0
+        self._last_stats_tx = 0
 
     def start(self):
         log("=" * 60)
@@ -638,8 +656,9 @@ class UdpVpnServer:
         # ── Fix IP header checksum ──
         pkt[10:12] = b"\x00\x00"
         pkt[12:16] = new_ip_bytes
+        ihl = (pkt[0] & 0x0F) * 4  # actual IP header length (may include options)
         ip_sum = 0
-        for i in range(0, 20, 2):
+        for i in range(0, min(ihl, len(pkt)), 2):
             ip_sum += pkt[i] << 8 | pkt[i + 1]
         while ip_sum >> 16:
             ip_sum = (ip_sum & 0xFFFF) + (ip_sum >> 16)
@@ -693,11 +712,16 @@ class UdpVpnServer:
         s = self.sessions.stats()
         rx_mb = s["total_rx"] / 1024 / 1024
         tx_mb = s["total_tx"] / 1024 / 1024
+        # Rate = delta since last stats print (not cumulative)
+        delta_rx = s["total_rx"] - self._last_stats_rx
+        delta_tx = s["total_tx"] - self._last_stats_tx
+        self._last_stats_rx = s["total_rx"]
+        self._last_stats_tx = s["total_tx"]
         log(
             f"[stats] sessions={s['active']}  "
             f"rx={rx_mb:.2f}MB  tx={tx_mb:.2f}MB  "
-            f"rate={s['total_rx'] / STATS_INTERVAL / 1024:.0f}KB/s↓ "
-            f"{s['total_tx'] / STATS_INTERVAL / 1024:.0f}KB/s↑"
+            f"rate={delta_rx / STATS_INTERVAL / 1024:.0f}KB/s↓ "
+            f"{delta_tx / STATS_INTERVAL / 1024:.0f}KB/s↑"
         )
         for ip, info in s["sessions"].items():
             log(

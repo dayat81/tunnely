@@ -110,9 +110,9 @@ class UdpTunnelVpnService : VpnService() {
     private var serverAddr: InetAddress? = null
     private var serverPort: Int = 0
 
-    private var totalRx: Long = 0
-    private var totalTx: Long = 0
-    private var lastPacketTime: Long = 0
+    @Volatile private var totalRx: Long = 0
+    @Volatile private var totalTx: Long = 0
+    @Volatile private var lastPacketTime: Long = 0
     private var connectTime: Long = 0
 
     override fun onCreate() {

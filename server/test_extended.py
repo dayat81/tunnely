@@ -385,12 +385,11 @@ class TestRewriteSrcIp:
         rewritten = self.server._rewrite_src_ip(pkt, "10.20.0.5")
         assert extract_src_ip(rewritten) == "10.20.0.5"
 
-    def test_rewrite_short_packet_raises(self):
-        """Packet shorter than 20 bytes causes IndexError (known limitation)."""
+    def test_rewrite_short_packet_no_crash(self):
+        """Packet shorter than 20 bytes now handled gracefully (IHL-based checksum)."""
         pkt = b"\x45" + b"\x00" * 15  # 16 bytes, < 20
-        import pytest
-        with pytest.raises(IndexError):
-            self.server._rewrite_src_ip(pkt, "10.20.0.5")
+        rewritten = self.server._rewrite_src_ip(pkt, "10.20.0.5")
+        assert len(rewritten) == len(pkt)
 
     def test_rewrite_multiple_times(self):
         """Multiple rewrites should produce valid checksums each time."""
@@ -500,13 +499,12 @@ class TestIpExtractionEdgeCases:
         pkt = build_ip_packet(dst_ip="10.0.2.3", ihl=6)
         assert extract_dst_ip(pkt) == "10.0.2.3"
 
-    def test_extract_ipv6_returns_garbage(self):
-        """IPv6: extract_src_ip doesn't check version (known limitation)."""
+    def test_extract_ipv6_returns_none(self):
+        """IPv6: extract_src_ip now correctly returns None (IPv4 check added)."""
         pkt = bytearray(40)
         pkt[0] = 0x60  # IPv6
-        # extract_src_ip reads bytes 12-16 regardless of version
         result = extract_src_ip(bytes(pkt))
-        assert result is not None  # returns garbage, not None
+        assert result is None  # fixed: now validates IPv4 version
 
 
 # ── extract_udp_dst_port Edge Cases ──────────────────────────────────
@@ -760,6 +758,119 @@ class TestRewriteForwardCycle:
         rewritten = self.server._rewrite_src_ip(pkt, assigned_ip)
         assert extract_src_ip(rewritten) == assigned_ip
         assert self.sm.get_addr_by_ip(assigned_ip) == addr
+
+
+# ── Pool Exhaustion Fix Tests ─────────────────────────────────────────
+
+class TestPoolExhaustionFix:
+    """Test that pool exhaustion no longer crashes the server."""
+
+    def test_exhaustion_evicts_oldest(self):
+        """When pool is exhausted, oldest session is evicted."""
+        sm = SessionManager("10.20.0.0/28", state_file="/dev/null")  # 12 usable
+        for i in range(12):
+            sm.assign_ip((f"10.0.0.{i}", 1000 + i))
+        assert len(sm.sessions) == 12
+        # One more — should evict oldest
+        ip = sm.assign_ip(("99.99.99.99", 9999))
+        assert ip.startswith("10.20.0.")
+        assert len(sm.sessions) == 12  # evicted one, added one
+
+    def test_exhaustion_preserves_new_session(self):
+        """New session survives after eviction."""
+        sm = SessionManager("10.20.0.0/28", state_file="/dev/null")
+        for i in range(12):
+            sm.assign_ip((f"10.0.0.{i}", 1000 + i))
+        ip = sm.assign_ip(("99.99.99.99", 9999))
+        assert ip in sm.sessions
+        assert sm.sessions[ip]["addr"] == ("99.99.99.99", 9999)
+
+
+# ── extract_src_ip IPv4 Validation Tests ──────────────────────────────
+
+class TestSrcIpValidation:
+    """Test that extract_src_ip validates IPv4 version."""
+
+    def test_ipv4_valid(self):
+        pkt = build_ip_packet(src_ip="10.20.0.5")
+        assert extract_src_ip(pkt) == "10.20.0.5"
+
+    def test_ipv6_rejected(self):
+        pkt = bytearray(40)
+        pkt[0] = 0x60  # IPv6
+        assert extract_src_ip(bytes(pkt)) is None
+
+    def test_version_0_rejected(self):
+        pkt = bytearray(20)
+        pkt[0] = 0x00  # version 0
+        assert extract_src_ip(bytes(pkt)) is None
+
+    def test_version_15_rejected(self):
+        pkt = bytearray(20)
+        pkt[0] = 0xF0  # version 15
+        assert extract_src_ip(bytes(pkt)) is None
+
+
+# ── IP Checksum with Options Tests ───────────────────────────────────
+
+class TestChecksumWithOptions:
+    """Test IP checksum with IP options (IHL > 5)."""
+
+    def setup_method(self):
+        self.server = UdpVpnServer.__new__(UdpVpnServer)
+
+    def test_rewrite_with_ihl5(self):
+        """Standard 20-byte header."""
+        pkt = build_udp_packet(src_ip="10.20.0.2", ihl=5)
+        rewritten = self.server._rewrite_src_ip(pkt, "10.20.0.5")
+        assert extract_src_ip(rewritten) == "10.20.0.5"
+
+    def test_rewrite_with_ihl6(self):
+        """24-byte header (4 bytes options)."""
+        pkt = build_udp_packet(src_ip="10.20.0.2", ihl=6)
+        rewritten = self.server._rewrite_src_ip(pkt, "10.20.0.5")
+        assert extract_src_ip(rewritten) == "10.20.0.5"
+
+    def test_rewrite_with_ihl7(self):
+        """28-byte header (8 bytes options)."""
+        pkt = build_udp_packet(src_ip="10.20.0.2", ihl=7)
+        rewritten = self.server._rewrite_src_ip(pkt, "10.20.0.5")
+        assert extract_src_ip(rewritten) == "10.20.0.5"
+
+    def test_checksum_covers_options(self):
+        """Checksum must cover the full IP header including options."""
+        pkt = build_udp_packet(src_ip="10.20.0.2", ihl=6)
+        rewritten = self.server._rewrite_src_ip(pkt, "10.20.0.5")
+        # Verify checksum is valid
+        ihl = (rewritten[0] & 0x0F) * 4
+        assert ihl == 24
+        ip_hdr = bytearray(rewritten[:ihl])
+        assert compute_ip_checksum(ip_hdr) == 0
+
+
+# ── Stats Snapshot Tests ──────────────────────────────────────────────
+
+class TestStatsSnapshot:
+    """Test that stats() uses a snapshot to avoid concurrent modification."""
+
+    def setup_method(self):
+        self.sm = SessionManager("10.20.0.0/24", state_file="/dev/null")
+
+    def test_stats_uses_snapshot(self):
+        """Stats should work even if sessions change during iteration."""
+        for i in range(5):
+            self.sm.assign_ip((f"10.0.0.{i}", 1000 + i))
+        s = self.sm.stats()
+        assert s["active"] == 5
+
+    def test_stats_consistent(self):
+        """Stats should be internally consistent."""
+        ip = self.sm.assign_ip(("1.2.3.4", 1000))
+        self.sm.touch(ip, rx_bytes=100, tx_bytes=50)
+        s = self.sm.stats()
+        assert s["total_rx"] == 100
+        assert s["total_tx"] == 50
+        assert s["active"] == 1
 
 
 # ── Run Tests ─────────────────────────────────────────────────────────
