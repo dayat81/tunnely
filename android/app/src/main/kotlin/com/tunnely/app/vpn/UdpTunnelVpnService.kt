@@ -58,6 +58,72 @@ class UdpTunnelVpnService : VpnService() {
         private const val KEEPALIVE_INTERVAL = 15_000L // 15s
         private const val MAX_PACKET = 32767
 
+        // Minimal DNS fix for emulator: 10.0.2.3 (emulator system DNS) is unreachable
+        // through VPN tunnel. Intercept ONLY 10.0.2.3:53 queries, rewrite to 8.8.8.8.
+        // Single-use map keyed by srcPort. QR bit check on downlink.
+        private const val EMULATOR_DNS = 0x0A000203  // 10.0.2.3
+        private const val PUBLIC_DNS = 0x08080808    // 8.8.8.8
+        private val dnsMap = java.util.concurrent.ConcurrentHashMap<Int, Long>()  // srcPort → (origDstIp | srcPort<<32)
+
+        fun rewriteDnsUplink(buf: ByteArray, n: Int): ByteArray {
+            if (n < 28) return buf
+            if (buf[9].toInt() and 0xFF != 17) return buf  // UDP only
+            val ihl = (buf[0].toInt() and 0xF) * 4
+            if (n < ihl + 8) return buf
+            val dstPort = ((buf[ihl + 2].toInt() and 0xFF) shl 8) or (buf[ihl + 3].toInt() and 0xFF)
+            if (dstPort != 53) return buf
+            val dstIp = readIp(buf, 16)
+            if (dstIp != EMULATOR_DNS) return buf  // only intercept 10.0.2.3
+
+            val srcPort = ((buf[ihl].toInt() and 0xFF) shl 8) or (buf[ihl + 1].toInt() and 0xFF)
+            dnsMap[srcPort] = dstIp.toLong()  // single-use entry
+
+            val result = buf.copyOf(n)
+            writeIp(result, 16, PUBLIC_DNS)
+            result[10] = 0; result[11] = 0  // clear IP checksum for kernel recalc
+            // UDP checksum: zero = no checksum (valid per RFC 768). Server MASQUERADE recalculates.
+            val udpCkOff = ihl + 6
+            result[udpCkOff] = 0; result[udpCkOff + 1] = 0
+            return result
+        }
+
+        fun rewriteDnsDownlink(buf: ByteArray, n: Int): ByteArray {
+            if (n < 28) return buf
+            if (buf[9].toInt() and 0xFF != 17) return buf
+            val ihl = (buf[0].toInt() and 0xF) * 4
+            if (n < ihl + 8) return buf
+            val srcPort = ((buf[ihl].toInt() and 0xFF) shl 8) or (buf[ihl + 1].toInt() and 0xFF)
+            if (srcPort != 53) return buf
+            val srcIp = readIp(buf, 12)
+            if (srcIp != PUBLIC_DNS) return buf
+
+            // QR bit check — only rewrite DNS responses (bit 15 = 1)
+            val dnsOff = ihl + 8
+            if (n < dnsOff + 2) return buf
+            if ((buf[dnsOff].toInt() and 0x80) == 0) return buf  // it's a query
+
+            val dstPort = ((buf[ihl + 2].toInt() and 0xFF) shl 8) or (buf[ihl + 3].toInt() and 0xFF)
+            val origIp = dnsMap.remove(dstPort) ?: return buf  // single-use: remove on match
+
+            val result = buf.copyOf(n)
+            writeIp(result, 12, origIp.toInt())
+            result[10] = 0; result[11] = 0
+            val udpCkOff = ihl + 6
+            result[udpCkOff] = 0; result[udpCkOff + 1] = 0
+            return result
+        }
+
+        private fun readIp(buf: ByteArray, off: Int): Int =
+            ((buf[off].toInt() and 0xFF) shl 24) or ((buf[off+1].toInt() and 0xFF) shl 16) or
+            ((buf[off+2].toInt() and 0xFF) shl 8) or (buf[off+3].toInt() and 0xFF)
+
+        private fun writeIp(buf: ByteArray, off: Int, ip: Int) {
+            buf[off] = ((ip shr 24) and 0xFF).toByte()
+            buf[off+1] = ((ip shr 16) and 0xFF).toByte()
+            buf[off+2] = ((ip shr 8) and 0xFF).toByte()
+            buf[off+3] = (ip and 0xFF).toByte()
+        }
+
         // Shared state (same interface as old TunnelyVpnService for UI compat)
         private val _vpnState = MutableStateFlow(VpnState.DISCONNECTED)
         val vpnState: StateFlow<VpnState> = _vpnState.asStateFlow()
@@ -262,10 +328,15 @@ class UdpTunnelVpnService : VpnService() {
                     val n = input.read(buf)
                     if (n <= 0) continue
 
-                    // Track flow
-                    PacketFlowTracker.processPacket(buf.copyOf(n), isUplink = true)
+                    // DNS fix: rewrite 10.0.2.3 → 8.8.8.8 (emulator system DNS)
+                    val sendBuf = rewriteDnsUplink(buf, n)
+                    val sendLen = sendBuf.size
 
-                    outPkt.length = n
+                    // Track flow
+                    PacketFlowTracker.processPacket(sendBuf.copyOf(sendLen), isUplink = true)
+
+                    outPkt.length = sendLen
+                    System.arraycopy(sendBuf, 0, outPkt.data, 0, sendLen)
                     sock.send(outPkt)
 
                     totalTx += n
@@ -306,11 +377,15 @@ class UdpTunnelVpnService : VpnService() {
                     val n = pkt.length
                     if (n <= 0) continue
 
+                    // DNS fix: rewrite 8.8.8.8 response back to 10.0.2.3
+                    val recvBuf = rewriteDnsDownlink(buf, n)
+                    val recvLen = recvBuf.size
+
                     // Track flow
-                    PacketFlowTracker.processPacket(buf.copyOf(n), isUplink = false)
+                    PacketFlowTracker.processPacket(recvBuf.copyOf(recvLen), isUplink = false)
 
                     // Write raw IP packet to TUN
-                    output.write(buf, 0, n)
+                    output.write(recvBuf, 0, recvLen)
 
                     totalRx += n
                     lastPacketTime = System.currentTimeMillis()
