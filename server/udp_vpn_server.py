@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Tunnely UDP VPN Server
-=======================
+Tunnely UDP VPN Server v3.5.1
+===============================
 Lightweight UDP tunnel daemon — no WireGuard, no crypto, no key management.
 
 Architecture:
@@ -31,6 +31,8 @@ import argparse
 import json
 
 # ── Constants ──────────────────────────────────────────────────────────────
+
+__version__ = "3.5.1"
 
 TUNSETIFF = 0x400454CA
 IFF_TUN = 0x0001
@@ -334,7 +336,7 @@ class UdpVpnServer:
 
     def start(self):
         log("=" * 60)
-        log("Tunnely UDP VPN Server starting...")
+        log(f"Tunnely UDP VPN Server v{__version__} starting...")
         log(f"  Subnet:    {self.subnet}")
         log(f"  Server IP: {self.server_ip}")
         log(f"  TUN:       {self.tun_name}")
