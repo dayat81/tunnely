@@ -19,30 +19,37 @@ Requires: root (TUN device + iptables NAT)
 """
 import fcntl
 import os
-import select
 import socket
 import struct
 import subprocess
 import sys
 import time
 import signal
-import ipaddress
 import argparse
 import json
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import ipaddress
+import select
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
-__version__ = "3.5.2"
+__version__ = "3.6.0"
 
 TUNSETIFF = 0x400454CA
 IFF_TUN = 0x0001
 IFF_NO_PI = 0x1000  # no packet info header
 
-IDLE_TIMEOUT = 180  # seconds before session cleanup
+IDLE_TIMEOUT = 180
 BUFFER_SIZE = 65535
+MAX_BATCH = 64  # max packets to drain per fd per select()
 STATS_INTERVAL = 30
+
+# Pre-packed bytes for common IPs (avoid ipaddress in hot path)
+_DNS_8888 = socket.inet_aton("8.8.8.8")
+PRIVATE_DNS_IP_BYTES = frozenset({
+    socket.inet_aton(ip) for ip in ("10.0.2.3", "10.0.2.2", "10.0.3.3")
+})
 
 # Private DNS IPs that clients may try to reach (e.g., emulator 10.0.2.3)
 # These are intercepted and forwarded to 8.8.8.8 instead of routing through TUN.
@@ -287,23 +294,44 @@ class SessionManager:
 
 # ── Packet Parsing ─────────────────────────────────────────────────────────
 
+def _ntoa(raw: bytes) -> str:
+    """Fast IP bytes → string (replaces ipaddress.IPv4Address)."""
+    return f"{raw[0]}.{raw[1]}.{raw[2]}.{raw[3]}"
+
+def _aton(ip_str: str) -> bytes:
+    """Fast IP string → bytes."""
+    return socket.inet_aton(ip_str)
+
 def extract_dst_ip(packet: bytes) -> str | None:
     """Extract destination IPv4 address from raw IP packet."""
     if len(packet) < 20:
         return None
-    version = (packet[0] >> 4) & 0xF
-    if version != 4:
+    if (packet[0] >> 4) != 4:
         return None
-    return str(ipaddress.IPv4Address(packet[16:20]))
+    return _ntoa(packet[16:20])
 
 
 def extract_src_ip(packet: bytes) -> str | None:
     """Extract source IPv4 address from raw IP packet."""
     if len(packet) < 20:
         return None
-    if (packet[0] >> 4) != 4:  # Not IPv4
+    if (packet[0] >> 4) != 4:
         return None
-    return str(ipaddress.IPv4Address(packet[12:16]))
+    return _ntoa(packet[12:16])
+
+
+def extract_dst_ip_raw(packet: bytes) -> bytes | None:
+    """Extract destination IP as raw 4 bytes (zero-alloc hot path)."""
+    if len(packet) < 20 or (packet[0] >> 4) != 4:
+        return None
+    return packet[16:20]
+
+
+def extract_src_ip_raw(packet: bytes) -> bytes | None:
+    """Extract source IP as raw 4 bytes (zero-alloc hot path)."""
+    if len(packet) < 20 or (packet[0] >> 4) != 4:
+        return None
+    return packet[12:16]
 
 
 def extract_udp_dst_port(packet: bytes) -> int | None:
@@ -416,10 +444,39 @@ class UdpVpnServer:
             log(f"HTTP stats server failed: {e}", "WARN")
 
     def _loop(self):
-        """Main select() loop: TUN fd ↔ UDP socket ↔ DNS forwarder."""
-        watch_fds = [self.tun_fd, self.sock, self.dns_sock]
+        """Main event loop: TUN fd ↔ UDP socket ↔ DNS forwarder.
+        
+        Optimizations:
+        - epoll on Linux (O(1) for active fds vs O(n) for select)
+        - Batch-drain each fd (up to MAX_BATCH packets per wake)
+        - Cached timestamp (one time.time() per iteration)
+        """
+        # Use epoll on Linux, fall back to select
+        use_epoll = hasattr(select, 'epoll')
+        if use_epoll:
+            ep = select.epoll()
+            ep.register(self.tun_fd, select.EPOLLIN)
+            ep.register(self.sock.fileno(), select.EPOLLIN)
+            ep.register(self.dns_sock.fileno(), select.EPOLLIN)
+            fd_map = {
+                self.tun_fd: 'tun',
+                self.sock.fileno(): 'udp',
+                self.dns_sock.fileno(): 'dns',
+            }
+        else:
+            watch_fds = [self.tun_fd, self.sock, self.dns_sock]
+
         while self.running:
-            readable, _, _ = select.select(watch_fds, [], [], 1.0)
+            try:
+                if use_epoll:
+                    events = ep.poll(1.0)
+                    readable = [fd for fd, ev in events]
+                else:
+                    readable, _, _ = select.select(watch_fds, [], [], 1.0)
+            except (ValueError, OSError):
+                # fd closed after shutdown
+                break
+
             now = time.time()
 
             # Periodic tasks
@@ -432,19 +489,52 @@ class UdpVpnServer:
                 self.last_save = now
 
             for fd in readable:
-                if fd == self.sock:
-                    self._handle_udp()
-                elif fd == self.tun_fd:
-                    self._handle_tun()
-                elif fd == self.dns_sock:
-                    self._handle_dns_response()
+                if use_epoll:
+                    kind = fd_map.get(fd)
+                    if kind == 'udp':
+                        self._batch_handle_udp()
+                    elif kind == 'tun':
+                        self._batch_handle_tun()
+                    elif kind == 'dns':
+                        self._handle_dns_response()
+                else:
+                    if fd == self.sock:
+                        self._batch_handle_udp()
+                    elif fd == self.tun_fd:
+                        self._batch_handle_tun()
+                    elif fd == self.dns_sock:
+                        self._handle_dns_response()
 
-    def _handle_udp(self):
-        """Packet from client → write to TUN."""
-        try:
-            data, addr = self.sock.recvfrom(BUFFER_SIZE)
-        except socket.error:
-            return
+        if use_epoll:
+            ep.close()
+
+    def _batch_handle_udp(self):
+        """Drain all pending UDP packets (up to MAX_BATCH)."""
+        for _ in range(MAX_BATCH):
+            # Check if more data is available without blocking
+            ready, _, _ = select.select([self.sock], [], [], 0)
+            if not ready:
+                return
+            try:
+                data, addr = self.sock.recvfrom(BUFFER_SIZE)
+            except socket.error:
+                return
+            self._process_udp_packet(data, addr)
+
+    def _batch_handle_tun(self):
+        """Drain all pending TUN packets (up to MAX_BATCH)."""
+        for _ in range(MAX_BATCH):
+            ready, _, _ = select.select([self.tun_fd], [], [], 0)
+            if not ready:
+                return
+            try:
+                data = os.read(self.tun_fd, BUFFER_SIZE)
+            except OSError:
+                return
+            self._process_tun_packet(data)
+
+    def _process_udp_packet(self, data: bytes, addr):
+        """Process a single UDP packet from client → write to TUN."""
 
         if len(data) < 20:
             # Handle hello/keepalive packets (magic "TUNN" = 0x54554E4E)
@@ -481,7 +571,9 @@ class UdpVpnServer:
         # BUT: intercept DNS to private IPs (10.0.2.3 etc) — forward to 8.8.8.8
         dst_ip = extract_dst_ip(data)
         dst_port = extract_udp_dst_port(data)
-        if dst_ip and dst_ip in PRIVATE_DNS_IPS and dst_port == 53:
+        # Fast path: check raw bytes instead of string conversion
+        dst_raw = data[16:20] if len(data) >= 20 else None
+        if dst_raw and dst_raw in PRIVATE_DNS_IP_BYTES and dst_port == 53:
             self._forward_dns(data, dst_ip, assigned_ip, addr)
             return
 
@@ -496,12 +588,8 @@ class UdpVpnServer:
         except OSError as e:
             log(f"TUN write error: {e}", "WARN")
 
-    def _handle_tun(self):
-        """Packet from TUN → route to client via UDP."""
-        try:
-            data = os.read(self.tun_fd, BUFFER_SIZE)
-        except OSError:
-            return
+    def _process_tun_packet(self, data: bytes):
+        """Process a single TUN packet → route to client via UDP."""
 
         dst_ip = extract_dst_ip(data)
         if not dst_ip:
@@ -620,8 +708,8 @@ class UdpVpnServer:
         pkt[8] = 64    # TTL
         pkt[9] = 17    # UDP
         # IP checksum = 0 (kernel recalculates on TUN write)
-        src = ipaddress.IPv4Address(src_ip).packed
-        dst = ipaddress.IPv4Address(dst_ip).packed
+        src = _aton(src_ip)
+        dst = _aton(dst_ip)
         pkt[12:16] = src
         pkt[16:20] = dst
 
@@ -646,7 +734,7 @@ class UdpVpnServer:
         because the pseudo-header checksum no longer matches.
         """
         pkt = bytearray(packet)
-        new_ip_bytes = ipaddress.IPv4Address(new_ip).packed
+        new_ip_bytes = _aton(new_ip)
         old_src = bytes(pkt[12:16])
 
         # Skip if no change needed

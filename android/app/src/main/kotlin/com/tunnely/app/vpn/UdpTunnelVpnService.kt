@@ -282,8 +282,9 @@ class UdpTunnelVpnService : VpnService() {
                 } catch (e: java.net.PortUnreachableException) {
                     // Server not ready yet, retry
                 } catch (e: java.io.IOException) {
-                    if (running) RemoteLogger.w(TAG, "↓ TUN read error: ${e.message}")
-                    break
+                    if (!running) break
+                    RemoteLogger.w(TAG, "↓ TUN read error: ${e.message}, retrying...")
+                    Thread.sleep(100)  // brief pause before retry
                 } catch (e: Exception) {
                     if (running) RemoteLogger.w(TAG, "↓ loop error: ${e.message}")
                 }
@@ -327,8 +328,9 @@ class UdpTunnelVpnService : VpnService() {
                     // Normal — just means no data for 5s
                     continue
                 } catch (e: java.io.IOException) {
-                    if (running) RemoteLogger.w(TAG, "↑ TUN write error: ${e.message}")
-                    break
+                    if (!running) break
+                    RemoteLogger.w(TAG, "↑ TUN write error: ${e.message}, retrying...")
+                    Thread.sleep(100)
                 } catch (e: Exception) {
                     if (running) RemoteLogger.w(TAG, "↑ loop error: ${e.message}")
                 }
