@@ -236,9 +236,11 @@ class TestConnectionCycling:
         """After NAT rebind, client has new port → server sees new addr."""
         sm = SessionManager("10.20.0.0/24", state_file="/dev/null")
         ip1 = sm.assign_ip(("1.2.3.4", 1000))
-        # NAT rebind → new port
+        # NAT rebind → new port, but same client IP → same session (v3.13 fix)
         ip2 = sm.assign_ip(("1.2.3.4", 2000))
-        assert ip1 != ip2  # different IP because different addr
+        assert ip1 == ip2  # same IP because same client (NAT rebind)
+        # Verify port updated
+        assert sm.sessions[ip1]["addr"] == ("1.2.3.4", 2000)
 
 
 # ── Server Session Behavior During Instability ───────────────────────
@@ -266,9 +268,9 @@ class TestServerSessionDuringInstability:
         for i in range(10):
             ip = self.sm.assign_ip(("1.2.3.4", 1000 + i))
             ips.append(ip)
-        # All different IPs because different ports
-        assert len(set(ips)) == 10
-        assert len(self.sm.sessions) == 10
+        # All SAME IP because same client (NAT rebind dedup)
+        assert len(set(ips)) == 1
+        assert len(self.sm.sessions) == 1
 
     def test_session_accumulates_during_stable_period(self):
         """After cycling stops, session accumulates traffic normally."""
@@ -291,19 +293,12 @@ class TestServerSessionDuringInstability:
         assert len(self.sm.sessions) == 0
 
     def test_last_session_survives_cleanup(self):
-        """The most recent session (from the stable connection) survives."""
-        old_ips = []
-        for i in range(5):
-            ip = self.sm.assign_ip(("1.2.3.4", 1000 + i))
-            self.sm.sessions[ip]["last_seen"] = time.time() - 181
-            old_ips.append(ip)
-        # New stable connection
-        stable_ip = self.sm.assign_ip(("1.2.3.4", 9999))
-        self.sm.touch(stable_ip, rx_bytes=1000, tx_bytes=500)
+        """The session survives cleanup if recently touched."""
+        ip = self.sm.assign_ip(("1.2.3.4", 1000))
+        self.sm.touch(ip, rx_bytes=1000, tx_bytes=500)
         self.sm.cleanup()
-        assert stable_ip in self.sm.sessions
-        for old_ip in old_ips:
-            assert old_ip not in self.sm.sessions
+        assert ip in self.sm.sessions
+        assert self.sm.sessions[ip]["rx"] == 1000
 
 
 # ── MTU Configuration Consistency ────────────────────────────────────

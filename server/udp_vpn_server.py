@@ -173,6 +173,8 @@ class SessionManager:
     - Client dedup: same (ip,port) reuses existing session
     - Max session limit prevents pool exhaustion
     - Roaming: same IP but different port = update, not new session
+    - **IP-level dedup**: carrier NAT rebinding (same client IP, new port)
+      reuses existing session instead of creating a new one
     """
 
     MAX_SESSIONS = 50  # hard limit
@@ -189,16 +191,44 @@ class SessionManager:
         self.sessions = {}
         # addr tuple → ip str (reverse lookup)
         self.addr_to_ip = {}
+        # client IP (str, no port) → assigned tunnel IP (str)
+        # Key fix: carrier NAT rebinding changes port, not client IP
+        self.client_ip_map = {}
         self.state_file = state_file
 
     def assign_ip(self, client_addr) -> str:
-        """Assign or return existing IP for a client address."""
-        # Dedup: same client address → same IP
+        """Assign or return existing IP for a client address.
+        
+        Dedup priority:
+        1. Exact (ip, port) match → reuse (fast path)
+        2. Same client IP, different port → update port (NAT rebinding / roaming)
+        3. New client → allocate from pool
+        """
+        # Dedup 1: exact (ip, port) match
         if client_addr in self.addr_to_ip:
             ip = self.addr_to_ip[client_addr]
             self.sessions[ip]["last_seen"] = time.time()
             return ip
 
+        # Dedup 2: same client IP but different port (carrier NAT rebinding)
+        client_ip = client_addr[0]
+        if client_ip in self.client_ip_map:
+            assigned_ip = self.client_ip_map[client_ip]
+            if assigned_ip in self.sessions:
+                old_addr = self.sessions[assigned_ip]["addr"]
+                # Update port mapping
+                if old_addr in self.addr_to_ip:
+                    del self.addr_to_ip[old_addr]
+                self.sessions[assigned_ip]["addr"] = client_addr
+                self.sessions[assigned_ip]["last_seen"] = time.time()
+                self.addr_to_ip[client_addr] = assigned_ip
+                log(f"NAT rebind: {client_ip}:{old_addr[1]}→{client_addr[1]} keeps {assigned_ip}")
+                return assigned_ip
+            else:
+                # Stale mapping — session was cleaned up
+                del self.client_ip_map[client_ip]
+
+        # Dedup 3: new client → allocate
         # Enforce max sessions
         if len(self.sessions) >= self.MAX_SESSIONS:
             self.cleanup()
@@ -224,6 +254,7 @@ class SessionManager:
             "connected_at": time.time(),
         }
         self.addr_to_ip[client_addr] = ip
+        self.client_ip_map[client_ip] = ip
         log(f"Session assigned: {client_addr[0]}:{client_addr[1]} → {ip}")
         return ip
 
@@ -240,6 +271,7 @@ class SessionManager:
                 del self.addr_to_ip[old["addr"]]
             old["addr"] = new_addr
             self.addr_to_ip[new_addr] = ip
+            self.client_ip_map[new_addr[0]] = ip
             log(f"Session updated: {ip} → {new_addr[0]}:{new_addr[1]} (roaming)")
 
     def touch(self, ip: str, rx_bytes: int = 0, tx_bytes: int = 0):
@@ -264,6 +296,10 @@ class SessionManager:
             addr = s["addr"]
             if addr in self.addr_to_ip:
                 del self.addr_to_ip[addr]
+            # Clean up client_ip_map
+            client_ip = addr[0]
+            if self.client_ip_map.get(client_ip) == ip:
+                del self.client_ip_map[client_ip]
             duration = int(time.time() - s["connected_at"])
             log(f"Session {reason}: {ip} ({addr[0]}:{addr[1]}) after {duration}s")
         self._available.add(ip)
@@ -617,6 +653,9 @@ class UdpVpnServer:
 
         client_addr = self.sessions.get_addr_by_ip(dst_ip)
         if client_addr:
+            # Track TX using the ORIGINAL assigned IP (session key), before rewriting
+            assigned_ip = dst_ip
+
             # Rewrite dst IP from assigned IP back to client's TUN IP (10.20.0.2)
             # Without this, the client kernel drops packets with dst != 10.20.0.2
             CLIENT_TUN_IP = "10.20.0.2"
@@ -633,7 +672,7 @@ class UdpVpnServer:
 
             try:
                 self.sock.sendto(data, client_addr)
-                self.sessions.touch(dst_ip, tx_bytes=len(data))
+                self.sessions.touch(assigned_ip, tx_bytes=len(data))
             except socket.error as e:
                 log(f"UDP send error to {dst_ip}: {e}", "WARN")
         else:

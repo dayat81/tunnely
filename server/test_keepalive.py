@@ -481,6 +481,83 @@ class TestKeepaliveEdgeCases:
         assert addr not in self.sm.addr_to_ip
 
 
+# ── NAT Rebind Tests ──────────────────────────────────────────────────
+
+class TestNatRebind:
+    """Carrier NAT rebinding: same client IP, different port."""
+
+    def setup_method(self):
+        self.sm = SessionManager("10.20.0.0/24", state_file="/dev/null")
+
+    def test_nat_rebind_keeps_same_ip(self):
+        """Same client IP with new port reuses existing session."""
+        ip1 = self.sm.assign_ip(("119.235.222.139", 20511))
+        ip2 = self.sm.assign_ip(("119.235.222.139", 21277))
+        assert ip1 == ip2
+
+    def test_nat_rebind_updates_port(self):
+        """After rebind, session.addr has new port."""
+        ip = self.sm.assign_ip(("119.235.222.139", 20511))
+        self.sm.assign_ip(("119.235.222.139", 21277))
+        assert self.sm.sessions[ip]["addr"] == ("119.235.222.139", 21277)
+
+    def test_nat_rebind_cleans_old_addr(self):
+        """Old (ip, port) is removed from addr_to_ip after rebind."""
+        self.sm.assign_ip(("119.235.222.139", 20511))
+        self.sm.assign_ip(("119.235.222.139", 21277))
+        assert ("119.235.222.139", 20511) not in self.sm.addr_to_ip
+        assert ("119.235.222.139", 21277) in self.sm.addr_to_ip
+
+    def test_nat_rebind_preserves_rx_tx(self):
+        """Stats survive NAT rebind."""
+        ip = self.sm.assign_ip(("119.235.222.139", 20511))
+        self.sm.touch(ip, rx_bytes=1000, tx_bytes=2000)
+        self.sm.assign_ip(("119.235.222.139", 21277))
+        assert self.sm.sessions[ip]["rx"] == 1000
+        assert self.sm.sessions[ip]["tx"] == 2000
+
+    def test_multiple_rebinds_same_client(self):
+        """Multiple NAT rebinds all keep same session."""
+        ip = self.sm.assign_ip(("119.235.222.139", 20511))
+        for port in [20600, 20700, 20800, 20900, 21277]:
+            new_ip = self.sm.assign_ip(("119.235.222.139", port))
+            assert new_ip == ip
+        assert len(self.sm.sessions) == 1
+
+    def test_different_client_ips_get_different_sessions(self):
+        """Different client IPs still get different sessions."""
+        ip1 = self.sm.assign_ip(("119.235.222.139", 20511))
+        ip2 = self.sm.assign_ip(("203.83.40.108", 11308))
+        assert ip1 != ip2
+        assert len(self.sm.sessions) == 2
+
+    def test_rebind_after_expiry_gets_new_session(self):
+        """After session expires, rebind creates new session."""
+        ip1 = self.sm.assign_ip(("119.235.222.139", 20511))
+        self.sm.sessions[ip1]["last_seen"] = time.time() - 181
+        self.sm.cleanup()
+        ip2 = self.sm.assign_ip(("119.235.222.139", 21277))
+        assert ip2.startswith("10.20.0.")
+        # New session (old one expired)
+        assert ip2 != ip1 or ip1 not in self.sm.sessions
+
+    def test_client_ip_map_cleanup_on_remove(self):
+        """client_ip_map is cleaned when session is removed."""
+        ip = self.sm.assign_ip(("119.235.222.139", 20511))
+        assert "119.235.222.139" in self.sm.client_ip_map
+        self.sm._remove_session(ip)
+        assert "119.235.222.139" not in self.sm.client_ip_map
+
+    def test_no_session_leak_with_rebind(self):
+        """NAT rebinds don't leak sessions or IPs."""
+        initial_available = len(self.sm._available)
+        ip = self.sm.assign_ip(("119.235.222.139", 20511))
+        for port in range(20512, 20612):  # 100 rebinds
+            self.sm.assign_ip(("119.235.222.139", port))
+        assert len(self.sm.sessions) == 1
+        assert len(self.sm._available) == initial_available - 1
+
+
 # ── Run Tests ──────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
