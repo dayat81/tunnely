@@ -184,6 +184,7 @@ class ConnectFragment : Fragment() {
                 statusText.text = "Disconnected"
                 statusSubtext.text = "Tap CONNECT to start"
                 btnConnect.text = "CONNECT"
+                btnConnect.isEnabled = true
                 btnConnect.setBackgroundResource(R.drawable.bg_connect_button)
                 btnConnect.background.setTint(getColor(R.color.primary))
                 trafficCard.visibility = View.GONE
