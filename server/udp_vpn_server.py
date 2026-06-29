@@ -96,6 +96,14 @@ def setup_nat(tun_name: str, iface: str = "ens4"):
     subprocess.run(["iptables", "-A", "FORWARD", "-i", tun_name, "-j", "ACCEPT"], capture_output=True)
     subprocess.run(["iptables", "-A", "FORWARD", "-o", tun_name, "-j", "ACCEPT"], capture_output=True)
 
+    # MSS clamping — critical for TCP over tunnel (prevents fragmentation)
+    # ens4 MTU is 1460 on GCP; tunnel MTU is 1500; TCP MSS must be clamped
+    subprocess.run(
+        ["iptables", "-t", "mangle", "-A", "FORWARD", "-p", "tcp",
+         "--tcp-flags", "SYN,RST", "SYN", "-i", tun_name, "-j", "TCPMSS", "--clamp-mss-to-pmtu"],
+        capture_output=True,
+    )
+
     log(f"NAT configured: {tun_name} → {iface} MASQUERADE")
 
 
@@ -330,6 +338,13 @@ class UdpVpnServer:
             return
 
         if len(data) < 20:
+            # Handle hello/keepalive packets (magic "TUNN" = 0x54554E4E)
+            if len(data) == 4 and data == b"\x54\x55\x4E\x4E":
+                if addr not in self.sessions.addr_to_ip:
+                    assigned_ip = self.sessions.assign_ip(addr)
+                    log(f"Hello packet from {addr[0]}:{addr[1]} → {assigned_ip}")
+                else:
+                    self.sessions.touch(self.sessions.addr_to_ip[addr])
             return  # Not a valid IP packet
 
         src_ip = extract_src_ip(data)
@@ -379,26 +394,72 @@ class UdpVpnServer:
                 log(f"UDP send error to {dst_ip}: {e}", "WARN")
 
     def _rewrite_src_ip(self, packet: bytes, new_ip: str) -> bytes:
-        """Rewrite source IP in IP packet and fix checksum."""
+        """Rewrite source IP and fix ALL checksums (IP header + TCP/UDP transport).
+        
+        Without fixing transport checksums, the kernel silently drops TCP packets
+        because the pseudo-header checksum no longer matches.
+        """
         pkt = bytearray(packet)
         new_ip_bytes = ipaddress.IPv4Address(new_ip).packed
+        old_src = bytes(pkt[12:16])
 
-        # Zero old checksum for recalculation
-        old_sum = pkt[10] << 8 | pkt[11]
-        old_src = pkt[12:16]
+        # Skip if no change needed
+        if old_src == new_ip_bytes:
+            return bytes(pkt)
+
+        # ── Fix IP header checksum ──
         pkt[10:12] = b"\x00\x00"
         pkt[12:16] = new_ip_bytes
-
-        # Recalculate IP header checksum
-        checksum = 0
+        ip_sum = 0
         for i in range(0, 20, 2):
-            checksum += pkt[i] << 8 | pkt[i + 1]
-        while checksum >> 16:
-            checksum = (checksum & 0xFFFF) + (checksum >> 16)
-        checksum = ~checksum & 0xFFFF
-        pkt[10:12] = checksum.to_bytes(2, "big")
+            ip_sum += pkt[i] << 8 | pkt[i + 1]
+        while ip_sum >> 16:
+            ip_sum = (ip_sum & 0xFFFF) + (ip_sum >> 16)
+        pkt[10:12] = (~ip_sum & 0xFFFF).to_bytes(2, "big")
+
+        # ── Fix transport checksum (TCP/UDP) using RFC 1624 incremental update ──
+        if len(pkt) >= 20:
+            protocol = pkt[9]
+            ihl = (pkt[0] & 0x0F) * 4  # IP header length
+
+            if protocol == 6 and len(pkt) >= ihl + 18:
+                # TCP: checksum at offset 16 from TCP header
+                self._incremental_checksum_fix(pkt, ihl + 16, old_src, new_ip_bytes)
+            elif protocol == 17 and len(pkt) >= ihl + 8:
+                # UDP: checksum at offset 6 from UDP header (skip if 0 = no checksum)
+                udp_cksum_off = ihl + 6
+                if pkt[udp_cksum_off] != 0 or pkt[udp_cksum_off + 1] != 0:
+                    self._incremental_checksum_fix(pkt, udp_cksum_off, old_src, new_ip_bytes)
 
         return bytes(pkt)
+
+    @staticmethod
+    def _incremental_checksum_fix(pkt: bytearray, cksum_off: int, old_bytes: bytes, new_bytes: bytes):
+        """RFC 1624 incremental checksum update for changed source IP.
+        
+        HC' = ~(~HC + ~m + m')
+        where HC = old checksum, m = old bytes, m' = new bytes
+        """
+        # Read current transport checksum
+        cksum = (pkt[cksum_off] << 8) | pkt[cksum_off + 1]
+
+        # Compute: sum = ~HC + ~old + new (for each 16-bit word)
+        s = (~cksum & 0xFFFF)
+        for i in range(0, len(old_bytes), 2):
+            old_word = (old_bytes[i] << 8) | old_bytes[i + 1]
+            s += (~old_word & 0xFFFF)
+        for i in range(0, len(new_bytes), 2):
+            new_word = (new_bytes[i] << 8) | new_bytes[i + 1]
+            s += new_word
+
+        # Fold carries (ones' complement)
+        while s >> 16:
+            s = (s & 0xFFFF) + (s >> 16)
+
+        # Result is complement of sum
+        new_cksum = ~s & 0xFFFF
+        pkt[cksum_off] = (new_cksum >> 8) & 0xFF
+        pkt[cksum_off + 1] = new_cksum & 0xFF
 
     def _print_stats(self):
         s = self.sessions.stats()

@@ -102,7 +102,7 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="tunnely.site:51820"
+                        android:text="tunnely.site:8770"
                         android:textColor="@color/text_primary"
                         android:textSize="12sp"
                         android:fontFamily="monospace" />
@@ -117,7 +117,7 @@
                     <TextView
                         android:layout_width="80dp"
                         android:layout_height="wrap_content"
-                        android:text="PubKey"
+                        android:text="Mode"
                         android:textColor="@color/text_secondary"
                         android:textSize="12sp" />
 
@@ -157,11 +157,13 @@
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- Client Public Key Card -->
+        <!-- Client Public Key Card (hidden in UDP tunnel mode — no keys needed) -->
         <com.google.android.material.card.MaterialCardView
+            android:id="@+id/pubkey_card"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginBottom="12dp"
+            android:visibility="gone"
             app:cardBackgroundColor="@color/card_background"
             app:strokeColor="@color/card_border"
             app:strokeWidth="1dp"

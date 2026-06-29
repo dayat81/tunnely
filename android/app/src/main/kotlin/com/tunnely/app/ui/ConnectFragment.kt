@@ -235,10 +235,9 @@ class ConnectFragment : Fragment() {
         val app = requireActivity().application as TunnelyApp
         val prefs = app.prefs
 
-        serverEndpoint.text = "${prefs.serverAddress}:${prefs.serverPort}"
-        serverPubkey.text = truncateKey(prefs.serverPublicKey)
-        tunnelIp.text = prefs.tunnelAddress.ifEmpty { "Not assigned" }
-        clientPubkey.text = truncateKey(prefs.publicKey)
+        serverEndpoint.text = "${prefs.serverAddress}:8770"
+        serverPubkey.text = "UDP Tunnel (no keys)"
+        tunnelIp.text = prefs.tunnelAddress.ifEmpty { "Auto-assigned" }
     }
 
     private fun startConnect() {
