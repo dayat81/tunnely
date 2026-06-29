@@ -351,9 +351,7 @@ class UdpTunnelVpnService : VpnService() {
 
             while (running && !Thread.interrupted()) {
                 try {
-                    Thread.sleep(KEEPALIVE_INTERVAL)
-
-                    // Send keepalive to maintain NAT mapping
+                    // Send keepalive FIRST (don't delay — NAT mapping may expire)
                     val sock = udpSocket
                     val addr = serverAddr
                     val port = serverPort
@@ -364,6 +362,8 @@ class UdpTunnelVpnService : VpnService() {
                             RemoteLogger.w(TAG, "Keepalive send failed: ${e.message}")
                         }
                     }
+
+                    Thread.sleep(KEEPALIVE_INTERVAL)
 
                     // Update traffic stats
                     _trafficStats.value = TrafficStats(
