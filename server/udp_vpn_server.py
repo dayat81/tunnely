@@ -77,7 +77,7 @@ def setup_interface(name: str, server_ip: str, prefix_len: int):
     subprocess.run(
         ["ip", "addr", "add", f"{server_ip}/{prefix_len}", "dev", name], check=True
     )
-    subprocess.run(["ip", "link", "set", "dev", name, "up"], check=True)
+    subprocess.run(["ip", "link", "set", "dev", name, "mtu", "1400", "up"], check=True)
 
 
 def setup_nat(tun_name: str, iface: str = "ens4"):
@@ -101,10 +101,28 @@ def setup_nat(tun_name: str, iface: str = "ens4"):
     subprocess.run(["iptables", "-A", "FORWARD", "-o", tun_name, "-j", "ACCEPT"], capture_output=True)
 
     # MSS clamping — critical for TCP over tunnel (prevents fragmentation)
-    # ens4 MTU is 1460 on GCP; tunnel MTU is 1500; TCP MSS must be clamped
+    # Tunnel MTU = 1400, TCP MSS = 1400 - 40 (TCP+IP headers) = 1360
+    # Must account for UDP encapsulation overhead (28 bytes)
+    # Delete old rules first (idempotent)
+    subprocess.run(
+        ["iptables", "-t", "mangle", "-D", "FORWARD", "-p", "tcp",
+         "--tcp-flags", "SYN,RST", "SYN", "-i", tun_name, "-j", "TCPMSS", "--clamp-mss-to-pmtu"],
+        capture_output=True,
+    )
     subprocess.run(
         ["iptables", "-t", "mangle", "-A", "FORWARD", "-p", "tcp",
-         "--tcp-flags", "SYN,RST", "SYN", "-i", tun_name, "-j", "TCPMSS", "--clamp-mss-to-pmtu"],
+         "--tcp-flags", "SYN,RST", "SYN", "-i", tun_name, "-j", "TCPMSS", "--set-mss", "1360"],
+        capture_output=True,
+    )
+    # Also clamp responses going back to tunnel
+    subprocess.run(
+        ["iptables", "-t", "mangle", "-D", "FORWARD", "-p", "tcp",
+         "--tcp-flags", "SYN,RST", "SYN", "-o", tun_name, "-j", "TCPMSS", "--set-mss", "1360"],
+        capture_output=True,
+    )
+    subprocess.run(
+        ["iptables", "-t", "mangle", "-A", "FORWARD", "-p", "tcp",
+         "--tcp-flags", "SYN,RST", "SYN", "-o", tun_name, "-j", "TCPMSS", "--set-mss", "1360"],
         capture_output=True,
     )
 
@@ -119,6 +137,18 @@ def teardown_nat(tun_name: str, iface: str = "ens4"):
     )
     subprocess.run(["iptables", "-D", "FORWARD", "-i", tun_name, "-j", "ACCEPT"], capture_output=True)
     subprocess.run(["iptables", "-D", "FORWARD", "-o", tun_name, "-j", "ACCEPT"], capture_output=True)
+    # Clean up MSS clamping rules (both directions)
+    for flag in ["-i", "-o"]:
+        subprocess.run(
+            ["iptables", "-t", "mangle", "-D", "FORWARD", "-p", "tcp",
+             "--tcp-flags", "SYN,RST", "SYN", flag, tun_name, "-j", "TCPMSS", "--set-mss", "1360"],
+            capture_output=True,
+        )
+        subprocess.run(
+            ["iptables", "-t", "mangle", "-D", "FORWARD", "-p", "tcp",
+             "--tcp-flags", "SYN,RST", "SYN", flag, tun_name, "-j", "TCPMSS", "--clamp-mss-to-pmtu"],
+            capture_output=True,
+        )
 
 
 # ── Session Management ────────────────────────────────────────────────────

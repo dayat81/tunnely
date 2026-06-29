@@ -54,7 +54,7 @@ class UdpTunnelVpnService : VpnService() {
         private const val NOTIFICATION_ID = 1
 
         private const val TUNNEL_PORT = 8770
-        private const val TUNNEL_MTU = 1500
+        private const val TUNNEL_MTU = 1400  // Must be ≤ (ext_iface_MTU - 28 UDP overhead). GCP ens4=1460, so 1400 is safe.
         private const val KEEPALIVE_INTERVAL = 15_000L // 15s
         private const val MAX_PACKET = 32767
 

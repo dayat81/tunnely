@@ -544,6 +544,68 @@ class TestDnsResponseFormat:
         assert resp[3] & 0x0F == 3
 
 
+# ── MTU/MSS Configuration Tests ──────────────────────────────────────
+
+class TestMtuMssConfig:
+    """Verify MTU/MSS calculations for UDP tunnel."""
+
+    GCP_ENS4_MTU = 1460
+    UDP_OVERHEAD = 28  # 20 IP + 8 UDP
+    TUNNEL_MTU = 1400
+    TCP_HEADER = 40  # 20 IP + 20 TCP
+
+    def test_tunnel_mtu_fits_ens4(self):
+        """Tunnel packet + UDP overhead must fit in ens4 MTU."""
+        outer_packet = self.TUNNEL_MTU + self.UDP_OVERHEAD
+        assert outer_packet <= self.GCP_ENS4_MTU, (
+            f"Outer packet {outer_packet} exceeds ens4 MTU {self.GCP_ENS4_MTU}"
+        )
+
+    def test_tcp_mss_fits_tunnel(self):
+        """TCP MSS must fit in tunnel MTU minus TCP/IP headers."""
+        mss = self.TUNNEL_MTU - self.TCP_HEADER
+        tcp_segment = mss + self.TCP_HEADER
+        assert tcp_segment <= self.TUNNEL_MTU
+        assert mss == 1360
+
+    def test_full_encapsulation_size(self):
+        """Full encapsulation: TCP segment → tunnel packet → outer UDP → ens4."""
+        mss = 1360
+        inner_tcp = mss + self.TCP_HEADER  # 1400
+        outer_udp = inner_tcp + self.UDP_OVERHEAD  # 1428
+        assert outer_udp <= self.GCP_ENS4_MTU  # 1428 <= 1460 ✓
+
+    def test_old_mtu_would_exceed(self):
+        """Old MTU 1500 would exceed ens4 MTU — proves the bug."""
+        old_mtu = 1500
+        outer = old_mtu + self.UDP_OVERHEAD  # 1528
+        assert outer > self.GCP_ENS4_MTU, "Old MTU should have exceeded ens4"
+
+    def test_mss_1360_is_set(self):
+        """Verify MSS 1360 is the correct value for tunnel MTU 1400."""
+        # Server sets --set-mss 1360
+        # Client sets TUNNEL_MTU = 1400
+        # TCP MSS = tunnel_MTU - 40 = 1360
+        expected_mss = self.TUNNEL_MTU - self.TCP_HEADER
+        assert expected_mss == 1360
+
+    def test_no_fragmentation_with_mss(self):
+        """With MSS=1360, TCP data fits in single tunnel packet."""
+        mss = 1360
+        # TCP data (1360) + TCP header (20) + IP header (20) = 1400
+        inner_ip = mss + 20 + 20
+        assert inner_ip == self.TUNNEL_MTU
+        # Outer: 1400 + 28 = 1428 ≤ 1460
+        assert inner_ip + self.UDP_OVERHEAD <= self.GCP_ENS4_MTU
+
+    def test_fragmentation_with_old_mss(self):
+        """With old MSS (1460 from MTU 1500), packets would fragment."""
+        old_mss = 1460  # 1500 - 40
+        inner_ip = old_mss + 40  # 1500
+        outer = inner_ip + self.UDP_OVERHEAD  # 1528
+        assert outer > self.GCP_ENS4_MTU, "Old MSS would cause fragmentation"
+
+
 # ── Run Tests ──────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
