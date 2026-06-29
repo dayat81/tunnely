@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tunnely Server Monitor</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #0d1117;
+  color: #c9d1d9;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  padding: 20px;
+  min-height: 100vh;
+}
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #21262d;
+}
+.header h1 {
+  font-size: 24px;
+  color: #f0f6fc;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.header h1 .icon { font-size: 28px; }
+.status-badge {
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.status-ok { background: #238636; color: #fff; }
+.status-error { background: #da3633; color: #fff; }
+.status-warn { background: #9e6a03; color: #fff; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.card {
+  background: #161b22;
+  border: 1px solid #21262d;
+  border-radius: 12px;
+  padding: 20px;
+}
+.card .label { font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+.card .value { font-size: 32px; font-weight: 700; color: #f0f6fc; }
+.card .sub { font-size: 13px; color: #8b949e; margin-top: 4px; }
+.card.green .value { color: #3fb950; }
+.card.blue .value { color: #58a6ff; }
+.card.orange .value { color: #d29922; }
+.card.red .value { color: #f85149; }
+.card.purple .value { color: #bc8cff; }
+
+.section { margin-bottom: 24px; }
+.section h2 { font-size: 16px; color: #f0f6fc; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #161b22;
+  border: 1px solid #21262d;
+  border-radius: 12px;
+  overflow: hidden;
+}
+th {
+  background: #21262d;
+  padding: 12px 16px;
+  text-align: left;
+  font-size: 12px;
+  color: #8b949e;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+td { padding: 10px 16px; border-top: 1px solid #21262d; font-size: 14px; }
+tr:hover td { background: #1c2128; }
+.mono { font-family: 'SFMono-Regular', Consolas, monospace; font-size: 13px; }
+
+.chart-container {
+  background: #161b22;
+  border: 1px solid #21262d;
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+.chart-bar {
+  display: flex;
+  align-items: center;
+  margin-bottom: 8px;
+  gap: 10px;
+}
+.chart-label { width: 120px; font-size: 13px; color: #8b949e; text-align: right; }
+.chart-track { flex: 1; height: 24px; background: #21262d; border-radius: 4px; overflow: hidden; position: relative; }
+.chart-fill { height: 100%; border-radius: 4px; transition: width 0.5s ease; min-width: 2px; }
+.chart-fill.rx { background: linear-gradient(90deg, #238636, #3fb950); }
+.chart-fill.tx { background: linear-gradient(90deg, #1f6feb, #58a6ff); }
+.chart-value { width: 80px; font-size: 13px; color: #c9d1d9; font-family: monospace; }
+
+.footer {
+  text-align: center;
+  padding: 16px;
+  color: #484f58;
+  font-size: 12px;
+  border-top: 1px solid #21262d;
+  margin-top: 24px;
+}
+
+.pulse { animation: pulse 2s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+.error-bar {
+  background: #da3633;
+  color: #fff;
+  padding: 8px 16px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-size: 14px;
+  display: none;
+}
+.error-bar.visible { display: block; }
+
+@media (max-width: 768px) {
+  .grid { grid-template-columns: repeat(2, 1fr); }
+  .card .value { font-size: 24px; }
+  .header h1 { font-size: 18px; }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1><span class="icon">🔒</span> Tunnely Server</h1>
+  <div>
+    <span class="status-badge status-ok" id="status-badge">● Online</span>
+  </div>
+</div>
+
+<div class="error-bar" id="error-bar"></div>
+
+<div class="grid">
+  <div class="card green">
+    <div class="label">Active Sessions</div>
+    <div class="value" id="sessions">—</div>
+    <div class="sub" id="sessions-sub"></div>
+  </div>
+  <div class="card blue">
+    <div class="label">Total Download</div>
+    <div class="value" id="total-rx">—</div>
+    <div class="sub" id="rate-rx"></div>
+  </div>
+  <div class="card orange">
+    <div class="label">Total Upload</div>
+    <div class="value" id="total-tx">—</div>
+    <div class="sub" id="rate-tx"></div>
+  </div>
+  <div class="card purple">
+    <div class="label">Uptime</div>
+    <div class="value" id="uptime">—</div>
+    <div class="sub" id="version"></div>
+  </div>
+</div>
+
+<div class="section">
+  <h2>📊 Per-Client Traffic</h2>
+  <div class="chart-container" id="traffic-chart"></div>
+</div>
+
+<div class="section">
+  <h2>👥 Active Clients</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Tunnel IP</th>
+        <th>Client Address</th>
+        <th>Download</th>
+        <th>Upload</th>
+        <th>Idle</th>
+      </tr>
+    </thead>
+    <tbody id="clients-table"></tbody>
+  </table>
+</div>
+
+<div class="section">
+  <h2>🖥️ Server Info</h2>
+  <div class="grid">
+    <div class="card">
+      <div class="label">Version</div>
+      <div class="value mono" id="info-version" style="font-size:20px">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Subnet</div>
+      <div class="value mono" id="info-subnet" style="font-size:20px">—</div>
+    </div>
+    <div class="card">
+      <div class="label">TUN Interface</div>
+      <div class="value mono" id="info-tun" style="font-size:20px">—</div>
+    </div>
+    <div class="card">
+      <div class="label">External Interface</div>
+      <div class="value mono" id="info-ext" style="font-size:20px">—</div>
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  Tunnely VPN Server v<span id="footer-version">—</span> · Auto-refreshes every 2s
+</div>
+
+<script>
+const API_URL = window.location.origin + '/api/vpn/stats';
+let prevRx = 0, prevTx = 0, prevTime = 0;
+let history = [];
+
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+function formatDuration(seconds) {
+  if (seconds < 60) return seconds + 's';
+  if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return h + 'h ' + m + 'm';
+}
+
+function formatRate(bytesPerSec) {
+  if (bytesPerSec < 1024) return bytesPerSec.toFixed(0) + ' B/s';
+  if (bytesPerSec < 1024 * 1024) return (bytesPerSec / 1024).toFixed(1) + ' KB/s';
+  return (bytesPerSec / 1024 / 1024).toFixed(1) + ' MB/s';
+}
+
+function updateDashboard(data) {
+  const now = Date.now();
+
+  // Status badge
+  const badge = document.getElementById('status-badge');
+  badge.textContent = '● Online';
+  badge.className = 'status-badge status-ok';
+  document.getElementById('error-bar').classList.remove('visible');
+
+  // Sessions
+  document.getElementById('sessions').textContent = data.active_sessions;
+  document.getElementById('sessions-sub').textContent =
+    data.active_sessions === 1 ? '1 client connected' : data.active_sessions + ' clients connected';
+
+  // Traffic
+  document.getElementById('total-rx').textContent = formatBytes(data.total_rx);
+  document.getElementById('total-tx').textContent = formatBytes(data.total_tx);
+
+  // Rates
+  if (prevTime > 0) {
+    const dt = (now - prevTime) / 1000;
+    const rxDelta = (data.total_rx - prevRx) / dt;
+    const txDelta = (data.total_tx - prevTx) / dt;
+    document.getElementById('rate-rx').textContent = '↓ ' + formatRate(rxDelta);
+    document.getElementById('rate-tx').textContent = '↑ ' + formatRate(txDelta);
+  }
+  prevRx = data.total_rx;
+  prevTx = data.total_tx;
+  prevTime = now;
+
+  // Uptime
+  document.getElementById('uptime').textContent = formatDuration(data.uptime_seconds);
+  document.getElementById('version').textContent = 'v' + data.version;
+
+  // Server info
+  document.getElementById('info-version').textContent = 'v' + data.version;
+  document.getElementById('info-subnet').textContent = data.subnet || '—';
+  document.getElementById('info-tun').textContent = data.tun_name || '—';
+  document.getElementById('info-ext').textContent = data.ext_iface || '—';
+  document.getElementById('footer-version').textContent = data.version || '—';
+
+  // Client table
+  const tbody = document.getElementById('clients-table');
+  const sessions = data.sessions || {};
+  const entries = Object.entries(sessions);
+
+  if (entries.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#484f58;padding:20px">No active clients</td></tr>';
+  } else {
+    tbody.innerHTML = entries.map(([ip, s]) => {
+      const idle = s.idle;
+      const idleClass = idle > 120 ? 'color:#f85149' : idle > 60 ? 'color:#d29922' : 'color:#3fb950';
+      return `<tr>
+        <td class="mono">${ip}</td>
+        <td class="mono">${s.addr}</td>
+        <td class="mono">${formatBytes(s.rx)}</td>
+        <td class="mono">${formatBytes(s.tx)}</td>
+        <td style="${idleClass}">${formatDuration(idle)}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // Traffic chart
+  const chartDiv = document.getElementById('traffic-chart');
+  if (entries.length === 0) {
+    chartDiv.innerHTML = '<div style="text-align:center;color:#484f58;padding:20px">No traffic data</div>';
+  } else {
+    const maxBytes = Math.max(...entries.map(([, s]) => Math.max(s.rx, s.tx)), 1);
+    chartDiv.innerHTML = entries.map(([ip, s]) => {
+      const rxPct = (s.rx / maxBytes * 100).toFixed(1);
+      const txPct = (s.tx / maxBytes * 100).toFixed(1);
+      return `
+        <div class="chart-bar">
+          <div class="chart-label">${ip}</div>
+          <div style="flex:1">
+            <div style="display:flex;align-items:center;margin-bottom:4px">
+              <div class="chart-track"><div class="chart-fill rx" style="width:${rxPct}%"></div></div>
+              <div class="chart-value">↓ ${formatBytes(s.rx)}</div>
+            </div>
+            <div style="display:flex;align-items:center">
+              <div class="chart-track"><div class="chart-fill tx" style="width:${txPct}%"></div></div>
+              <div class="chart-value">↑ ${formatBytes(s.tx)}</div>
+            </div>
+          </div>
+        </div>`;
+    }).join('');
+  }
+}
+
+async function fetchStats() {
+  try {
+    const resp = await fetch(API_URL);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    updateDashboard(data);
+  } catch (err) {
+    const badge = document.getElementById('status-badge');
+    badge.textContent = '● Offline';
+    badge.className = 'status-badge status-error';
+    const errBar = document.getElementById('error-bar');
+    errBar.textContent = '⚠ Failed to fetch stats: ' + err.message;
+    errBar.classList.add('visible');
+  }
+}
+
+fetchStats();
+setInterval(fetchStats, 2000);
+</script>
+</body>
+</html>

@@ -29,6 +29,8 @@ import signal
 import ipaddress
 import argparse
 import json
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
@@ -331,6 +333,7 @@ class UdpVpnServer:
         self.sock: socket.socket | None = None
         self.dns_sock: socket.socket | None = None  # for forwarding private DNS
         self.dns_tracks: dict = {}  # src_port → (client_ip, client_addr)
+        self.start_time = time.time()
         self.last_stats = 0
         self.last_save = 0
 
@@ -363,7 +366,11 @@ class UdpVpnServer:
         log(f"DNS forwarder on :{self.dns_sock.getsockname()[1]}")
 
         log(f"Listening on UDP :{self.port}")
+        log(f"Dashboard: http://0.0.0.0:{self.port + 1}/")
         log("Ready for connections.\n")
+
+        # Start HTTP stats server in background thread
+        self._start_http_server()
 
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -376,6 +383,19 @@ class UdpVpnServer:
     def _signal_handler(self, sig, frame):
         log(f"Signal {sig} received, shutting down...")
         self.running = False
+
+    def _start_http_server(self):
+        """Start HTTP stats server on UDP port + 1."""
+        http_port = self.port + 1
+        try:
+            StatsHttpHandler.server_ref = self
+            httpd = HTTPServer(("0.0.0.0", http_port), StatsHttpHandler)
+            httpd.timeout = 1
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            log(f"HTTP stats server on :{http_port}")
+        except Exception as e:
+            log(f"HTTP stats server failed: {e}", "WARN")
 
     def _loop(self):
         """Main select() loop: TUN fd ↔ UDP socket ↔ DNS forwarder."""
@@ -690,6 +710,71 @@ class UdpVpnServer:
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
+
+# ── HTTP Stats Dashboard ─────────────────────────────────────────────
+
+DASHBOARD_HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.html")
+
+
+class StatsHttpHandler(BaseHTTPRequestHandler):
+    """HTTP handler for stats API and dashboard."""
+
+    server_ref: object = None  # Set by UdpVpnServer before starting
+
+    def do_GET(self):
+        if self.path == "/api/stats" or self.path == "/api/vpn/stats":
+            self._serve_stats()
+        elif self.path == "/" or self.path == "/dashboard":
+            self._serve_dashboard()
+        else:
+            self.send_error(404)
+
+    def do_HEAD(self):
+        self.do_GET()
+
+    def _serve_stats(self):
+        srv = self.server_ref
+        if not srv:
+            self.send_error(503)
+            return
+
+        stats = srv.sessions.stats()
+        data = {
+            "version": __version__,
+            "uptime_seconds": int(time.time() - srv.start_time),
+            "active_sessions": stats["active"],
+            "total_rx": stats["total_rx"],
+            "total_tx": stats["total_tx"],
+            "sessions": stats["sessions"],
+            "subnet": srv.subnet,
+            "tun_name": srv.tun_name,
+            "ext_iface": srv.ext_iface,
+            "udp_port": srv.port,
+            "dns_forwarder_port": srv.dns_sock.getsockname()[1] if srv.dns_sock else None,
+        }
+        body = json.dumps(data).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_dashboard(self):
+        try:
+            with open(DASHBOARD_HTML_PATH, "rb") as f:
+                body = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except FileNotFoundError:
+            self.send_error(404, "Dashboard not found")
+
+    def log_message(self, format, *args):
+        pass  # Suppress HTTP access logs
+
 
 def main():
     parser = argparse.ArgumentParser(description="Tunnely UDP VPN Server")
