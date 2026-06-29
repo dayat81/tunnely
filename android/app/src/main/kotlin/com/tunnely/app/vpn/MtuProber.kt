@@ -7,29 +7,27 @@ import java.net.InetAddress
 /**
  * ICMP MTU discovery using binary search.
  * Runs `ping -M do -s <size>` to find the maximum path MTU,
- * then subtracts WireGuard overhead (60 bytes) to get the tunnel MTU.
+ * then subtracts UDP tunnel overhead (28 bytes) to get the tunnel MTU.
  */
 object MtuProber {
 
-    private const val WG_OVERHEAD = 60  // 20 IP + 8 UDP + 32 WireGuard
+    private const val UDP_OVERHEAD = 28  // 20 IP + 8 UDP (UDP tunnel, not WireGuard)
     private const val MAX_MTU = 1500
     private const val MIN_MTU = 68
     private const val PROBE_TIMEOUT_MS = 2000
 
     /**
      * Discover the optimal MTU for the given host using ICMP probes.
-     * Returns the WireGuard tunnel MTU (path MTU - WG_OVERHEAD).
+     * Returns the UDP tunnel MTU (path MTU - UDP_OVERHEAD).
      */
     suspend fun discover(host: String): Int = withContext(Dispatchers.IO) {
         try {
-            // Resolve the host to get IP address
             val address = InetAddress.getByName(host)
 
             var low = MIN_MTU
             var high = MAX_MTU
             var bestMtu = MIN_MTU
 
-            // Binary search for the maximum working MTU
             while (low <= high) {
                 val mid = (low + high) / 2
 
@@ -41,12 +39,11 @@ object MtuProber {
                 }
             }
 
-            // Subtract WireGuard overhead
-            val wgMtu = bestMtu - WG_OVERHEAD
-            wgMtu.coerceIn(576, 1420)
+            // Subtract UDP tunnel overhead (not WireGuard)
+            val tunnelMtu = bestMtu - UDP_OVERHEAD
+            tunnelMtu.coerceIn(576, 1400)  // cap at 1400 to match server TUN MTU
         } catch (e: Exception) {
-            // Default MTU if probing fails
-            1420
+            1400  // safe default matching server TUN MTU
         }
     }
 

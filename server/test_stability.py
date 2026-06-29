@@ -35,9 +35,8 @@ from udp_vpn_server import (
 # ── Constants (mirrored from client) ──────────────────────────────────
 
 TUNNEL_MTU = 1400          # UdpTunnelVpnService hardcoded
-PREFS_MTU_DEFAULT = 1420   # VpnPreferences default
-WG_OVERHEAD = 60           # MtuProber (WRONG for UDP tunnel)
-UDP_OVERHEAD = 28          # 20 IP + 8 UDP (correct for UDP tunnel)
+PREFS_MTU_DEFAULT = 1400   # VpnPreferences default (fixed)
+UDP_OVERHEAD = 28          # 20 IP + 8 UDP (now used by MtuProber)
 GCP_MTU = 1460             # GCP ens4
 KEEPALIVE_INTERVAL = 15    # seconds
 CLIENT_CONNECT_TIMEOUT = 4 # approximate seconds before reconnect
@@ -48,63 +47,52 @@ CLIENT_CONNECT_TIMEOUT = 4 # approximate seconds before reconnect
 class TestMtuProberOverheadBug:
     """MtuProber subtracts WireGuard overhead (60) but UDP tunnel only needs 28."""
 
-    def test_wg_overhead_is_wrong_for_udp_tunnel(self):
-        """WG_OVERHEAD=60 is wrong for UDP tunnel (should be 28)."""
-        assert WG_OVERHEAD == 60  # MtuProber uses this
-        assert UDP_OVERHEAD == 28  # Correct value for UDP tunnel
-        assert WG_OVERHEAD != UDP_OVERHEAD
+    def test_wg_overhead_replaced_by_udp_overhead(self):
+        """MtuProber now uses UDP_OVERHEAD=28 (was WG_OVERHEAD=60)."""
+        assert UDP_OVERHEAD == 28  # Now used by MtuProber
+        # Old WG_OVERHEAD=60 was a WireGuard leftover — now removed
 
-    def test_mtu_prober_returns_too_low(self):
-        """With path MTU 1500, MtuProber returns 1500-60=1440 (clamped to 1420).
-        With correct overhead, should return 1500-28=1472."""
+    def test_mtu_prober_returns_correct_value(self):
+        """With path MTU 1500, MtuProber returns 1500-28=1472 (clamped to 1400)."""
         path_mtu = 1500
-        probed_mtu = path_mtu - WG_OVERHEAD  # 1440
-        correct_mtu = path_mtu - UDP_OVERHEAD  # 1472
-        assert probed_mtu != correct_mtu
-        assert probed_mtu < correct_mtu
+        probed_mtu = path_mtu - UDP_OVERHEAD  # 1472
+        capped_mtu = min(probed_mtu, 1400)  # capped at server TUN MTU
+        assert capped_mtu == 1400
 
     def test_mtu_prober_with_gcp_mtu(self):
-        """On GCP (path MTU 1460), MtuProber returns 1460-60=1400 (correct by accident)."""
+        """On GCP (path MTU 1460), MtuProber returns 1460-28=1432 (capped to 1400)."""
         path_mtu = GCP_MTU
-        probed_mtu = path_mtu - WG_OVERHEAD
-        assert probed_mtu == TUNNEL_MTU  # 1400 — works on GCP by luck
+        probed_mtu = path_mtu - UDP_OVERHEAD  # 1432
+        capped_mtu = min(probed_mtu, 1400)
+        assert capped_mtu == TUNNEL_MTU  # 1400
 
-    def test_prefs_mtu_default_is_wrong(self):
-        """prefs.mtu defaults to 1420, but TUNNEL_MTU is 1400."""
-        assert PREFS_MTU_DEFAULT == 1420
+    def test_prefs_mtu_default_matches_tunnel_mtu(self):
+        """prefs.mtu now defaults to 1400, matching TUNNEL_MTU."""
+        assert PREFS_MTU_DEFAULT == 1400
         assert TUNNEL_MTU == 1400
-        assert PREFS_MTU_DEFAULT != TUNNEL_MTU
+        assert PREFS_MTU_DEFAULT == TUNNEL_MTU
 
-    def test_prefs_mtu_not_used_by_udp_tunnel(self):
-        """UdpTunnelVpnService uses TUNNEL_MTU constant, ignores prefs.mtu.
-        This means the MTU setting in Settings is cosmetic for UDP mode."""
-        # The VPN builder uses .setMtu(TUNNEL_MTU) not .setMtu(prefs.mtu)
-        # So prefs.mtu=1420 is displayed but 1400 is actually used
+    def test_prefs_mtu_matches_hardcoded(self):
+        """prefs.mtu default now matches TUNNEL_MTU (both 1400)."""
         assert TUNNEL_MTU == 1400  # hardcoded
-        assert PREFS_MTU_DEFAULT == 1420  # displayed in settings
+        assert PREFS_MTU_DEFAULT == 1400  # now matches
 
     def test_udp_overhead_calculation(self):
         """Correct UDP tunnel overhead: IP(20) + UDP(8) = 28 bytes."""
         ip_header = 20
         udp_header = 8
         assert ip_header + udp_header == UDP_OVERHEAD
-
-    def test_wg_overhead_calculation(self):
-        """WireGuard overhead: IP(20) + UDP(8) + WG(32) = 60 bytes."""
-        ip_header = 20
-        udp_header = 8
-        wg_header = 32
-        assert ip_header + udp_header + wg_header == WG_OVERHEAD
+        assert UDP_OVERHEAD == 28  # Used by MtuProber
 
     def test_tunnel_mtu_fits_with_correct_overhead(self):
         """TUNNEL_MTU + correct UDP overhead must fit in GCP MTU."""
         outer = TUNNEL_MTU + UDP_OVERHEAD
         assert outer <= GCP_MTU  # 1428 <= 1460 ✓
 
-    def test_tunnel_mtu_fits_with_wrong_overhead_too(self):
-        """TUNNEL_MTU + WG overhead also fits (but wastes 32 bytes)."""
-        outer = TUNNEL_MTU + WG_OVERHEAD
-        assert outer <= GCP_MTU  # 1460 <= 1460 ✓ (exactly at limit)
+    def test_tunnel_mtu_fits_with_udp_overhead(self):
+        """TUNNEL_MTU + UDP overhead fits in GCP MTU with headroom."""
+        outer = TUNNEL_MTU + UDP_OVERHEAD
+        assert outer <= GCP_MTU  # 1428 <= 1460 ✓ (32 bytes headroom)
 
 
 # ── Keepalive Timing vs NAT Timeout ─────────────────────────────────
@@ -193,14 +181,11 @@ class TestDnsWorksTcpDoesnt:
         tcp_packets = 100  # minimum for a page load
         assert tcp_packets > dns_packets
 
-    def test_mtu_mismatch_drops_tcp_data(self):
-        """If client sends 1420-byte packets but server TUN is 1400,
-        TCP data segments get dropped → TCP stalls."""
-        client_mtu = PREFS_MTU_DEFAULT  # 1420 (prefs default)
+    def test_mtu_matches_now(self):
+        """Client MTU now matches server TUN MTU (both 1400)."""
+        client_mtu = PREFS_MTU_DEFAULT  # 1400 (fixed)
         server_tun_mtu = TUNNEL_MTU  # 1400
-        # If client sends 1420-byte packet to server's TUN (1400),
-        # kernel drops it (exceeds TUN MTU)
-        assert client_mtu > server_tun_mtu  # 1420 > 1400 → PROBLEM
+        assert client_mtu == server_tun_mtu  # 1400 == 1400 ✓
 
     def test_dns_survives_mtu_mismatch(self):
         """DNS packets are small enough to survive MTU mismatch."""
@@ -350,14 +335,10 @@ class TestMtuConsistency:
         """TUNNEL_MTU + UDP_OVERHEAD ≤ GCP_MTU."""
         assert TUNNEL_MTU + UDP_OVERHEAD <= GCP_MTU
 
-    def test_prefs_mtu_ignored_by_udp_mode(self):
-        """prefs.mtu (default 1420) is NOT used by UdpTunnelVpnService.
-        This is a UX issue — settings shows 1420 but actual is 1400."""
-        # Document the mismatch
-        assert PREFS_MTU_DEFAULT == 1420
+    def test_prefs_mtu_consistent_with_tunnel(self):
+        """prefs.mtu default (1400) now matches TUNNEL_MTU (1400)."""
+        assert PREFS_MTU_DEFAULT == 1400
         assert TUNNEL_MTU == 1400
-        # The fix would be: either use prefs.mtu in UDP mode,
-        # or hide the MTU setting when UDP mode is selected.
 
 
 # ── Run Tests ─────────────────────────────────────────────────────────

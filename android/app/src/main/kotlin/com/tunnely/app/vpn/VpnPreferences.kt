@@ -38,7 +38,7 @@ class VpnPreferences(context: Context) {
         set(value) = prefs.edit().putString("tunnel_address", value).apply()
 
     var mtu: Int
-        get() = prefs.getInt("mtu", 1420)
+        get() = prefs.getInt("mtu", 1400)
         set(value) = prefs.edit().putInt("mtu", value).apply()
 
     var autoMtu: Boolean
