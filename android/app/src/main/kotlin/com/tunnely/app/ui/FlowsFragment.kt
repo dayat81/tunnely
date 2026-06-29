@@ -108,44 +108,25 @@ class FlowsFragment : Fragment() {
                 withContext(Dispatchers.Main) {
                     when (state) {
                         VpnState.CONNECTED -> {
-                            val app = requireActivity().application as TunnelyApp
-                            val apiClient = ApiClient(
-                                app.prefs.serverAddress,
-                                app.prefs.serverPort
-                            )
-
-                            // Extract IP from tunnelAddress (e.g., "10.10.0.45/32" → "10.10.0.45")
-                            val tunnelIp = app.prefs.tunnelAddress
-                                .split(",").first().trim()
-                                .split("/").first().trim()
-
-                            flowMonitor = FlowMonitor(apiClient, app.prefs)
-                            flowMonitor?.start(tunnelIp)
-
                             // Show stats card
                             statsCard.visibility = View.VISIBLE
 
-                            // Observe flow data
+                            // Poll PacketFlowTracker every 3s (runs in VPN service I/O threads)
                             viewLifecycleOwner.lifecycleScope.launch {
-                                flowMonitor?.flows?.collectLatest { flows ->
+                                while (UdpTunnelVpnService.vpnState.value == VpnState.CONNECTED) {
+                                    val flows = PacketFlowTracker.getFlows()
+                                    val stats = PacketFlowTracker.getAggregateStats()
                                     withContext(Dispatchers.Main) {
                                         adapter.submitList(flows)
                                         updateEmptyState(flows.isEmpty(), true)
-                                    }
-                                }
-                            }
-
-                            // Observe server stats
-                            viewLifecycleOwner.lifecycleScope.launch {
-                                flowMonitor?.serverStats?.collectLatest { stats ->
-                                    withContext(Dispatchers.Main) {
-                                        statsRxRate.text = formatRate(stats.rxRate)
+                                        statsRxRate.text = formatRate(0) // TODO: compute rate from delta
                                         statsRxTotal.text = formatBytes(stats.wgRx)
-                                        statsTxRate.text = formatRate(stats.txRate)
+                                        statsTxRate.text = formatRate(0)
                                         statsTxTotal.text = formatBytes(stats.wgTx)
                                         statsFlows.text = "${stats.activeFlows}"
                                         statsFlowsTotal.text = "${stats.totalFlows} total"
                                     }
+                                    kotlinx.coroutines.delay(3000)
                                 }
                             }
                         }

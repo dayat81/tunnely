@@ -260,6 +260,9 @@ class UdpTunnelVpnService : VpnService() {
                     if (n <= 0) continue
 
                     // Send raw IP packet to server
+                    // Track flow
+                    PacketFlowTracker.processPacket(buf.copyOf(n), isUplink = true)
+
                     outPkt.length = n
                     sock.send(outPkt)
 
@@ -300,6 +303,9 @@ class UdpTunnelVpnService : VpnService() {
                     sock.receive(pkt)
                     val n = pkt.length
                     if (n <= 0) continue
+
+                    // Track flow
+                    PacketFlowTracker.processPacket(buf.copyOf(n), isUplink = false)
 
                     // Write raw IP packet to TUN
                     output.write(buf, 0, n)
