@@ -5,11 +5,14 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.EditText
+import android.widget.ProgressBar
 import android.widget.Switch
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.button.MaterialButton
@@ -17,6 +20,9 @@ import com.tunnely.app.R
 import com.tunnely.app.TunnelyApp
 import com.tunnely.app.vpn.RemoteLogger
 import com.tunnely.app.vpn.VpnPreferences
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class SettingsFragment : Fragment() {
 
@@ -134,18 +140,56 @@ class SettingsFragment : Fragment() {
     private fun showAppPickerDialog() {
         val app = requireActivity().application as TunnelyApp
         val prefs = app.prefs
-        val pm = requireContext().packageManager
-        val myPackage = requireContext().packageName
 
-        // Get all installed apps (QUERY_ALL_PACKAGES permission gives full visibility)
-        val installedApps = pm.getInstalledPackages(PackageManager.GET_PERMISSIONS)
-            .filter { pkg ->
-                // Exclude Tunnely itself
-                pkg.packageName != myPackage
+        // Prevent button spam
+        btnPickApps.isEnabled = false
+
+        // Show loading dialog immediately (appears instantly, no freeze)
+        val progressBar = ProgressBar(requireContext()).apply {
+            setPadding(0, 48, 0, 48)
+        }
+        val loadingDialog = AlertDialog.Builder(requireContext(), R.style.Theme_Tunnely_Dialog)
+            .setTitle("Loading apps…")
+            .setView(progressBar)
+            .setCancelable(true)
+            .create()
+
+        loadingDialog.setOnCancelListener {
+            btnPickApps.isEnabled = prefs.splitTunneling
+        }
+        loadingDialog.show()
+
+        // Capture context for IO thread (requireContext() is UI-only)
+        val ctx = requireContext()
+        val pm = ctx.packageManager
+        val myPackage = ctx.packageName
+
+        // Load apps off the UI thread — no freeze, no focus leak
+        viewLifecycleOwner.lifecycleScope.launch {
+            val installedApps = withContext(Dispatchers.IO) {
+                loadInstalledApps(pm, myPackage, prefs)
             }
+
+            // Fragment may have been detached during loading
+            if (!isAdded || !loadingDialog.isShowing) {
+                btnPickApps.isEnabled = prefs.splitTunneling
+                return@launch
+            }
+
+            loadingDialog.dismiss()
+            showAppPickerDialogWithData(installedApps, prefs)
+            btnPickApps.isEnabled = prefs.splitTunneling
+        }
+    }
+
+    private fun loadInstalledApps(
+        pm: PackageManager,
+        myPackage: String,
+        prefs: VpnPreferences
+    ): List<SplitTunnelApp> {
+        return pm.getInstalledPackages(PackageManager.GET_PERMISSIONS)
+            .filter { it.packageName != myPackage }
             .filter { pkg ->
-                // Include apps that have INTERNET permission
-                // Also include if permissions list is null (might be system app)
                 val perms = pkg.requestedPermissions
                 perms == null || perms.contains(android.Manifest.permission.INTERNET)
             }
@@ -159,27 +203,31 @@ class SettingsFragment : Fragment() {
                 )
             }
             .sortedBy { it.appName.lowercase() }
+    }
 
+    private fun showAppPickerDialogWithData(
+        installedApps: List<SplitTunnelApp>,
+        prefs: VpnPreferences
+    ) {
         val adapter = SplitTunnelAppAdapter { /* toggle handled internally */ }
         adapter.submitApps(installedApps)
         adapter.setSelectedPackages(prefs.splitApps)
 
-        // Create search EditText
         val searchEdit = EditText(requireContext()).apply {
-            hint = "Search apps..."
+            hint = "Search apps…"
             setPadding(48, 24, 48, 24)
             setTextColor(resources.getColor(R.color.text_primary, null))
             setHintTextColor(resources.getColor(R.color.text_secondary, null))
+            // Don't auto-grab focus — prevents focus leak
+            isFocusableInTouchMode = false
         }
 
-        // Create RecyclerView
         val recyclerView = RecyclerView(requireContext()).apply {
             layoutManager = LinearLayoutManager(requireContext())
             this.adapter = adapter
             setPadding(0, 8, 0, 8)
         }
 
-        // Create container layout
         val container = android.widget.LinearLayout(requireContext()).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             addView(searchEdit, android.widget.LinearLayout.LayoutParams(
@@ -208,9 +256,16 @@ class SettingsFragment : Fragment() {
             }
             .create()
 
+        // Prevent keyboard from auto-opening (another focus leak source)
+        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN)
         dialog.show()
 
-        // Setup search filtering
+        // Now that dialog owns the window, enable search field focus safely
+        searchEdit.post {
+            searchEdit.isFocusableInTouchMode = true
+        }
+
+        // Search filtering
         searchEdit.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
