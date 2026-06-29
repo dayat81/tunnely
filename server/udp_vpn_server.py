@@ -34,7 +34,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
-__version__ = "3.5.1"
+__version__ = "3.5.2"
 
 TUNSETIFF = 0x400454CA
 IFF_TUN = 0x0001
