@@ -67,6 +67,7 @@ class UdpTunnelVpnService : VpnService() {
 
         fun rewriteDnsUplink(buf: ByteArray, n: Int): ByteArray {
             if (n < 28) return buf
+            if ((buf[0].toInt() ushr 4) and 0xF != 4) return buf  // IPv4 only
             if (buf[9].toInt() and 0xFF != 17) return buf  // UDP only
             val ihl = (buf[0].toInt() and 0xF) * 4
             if (n < ihl + 8) return buf
@@ -89,6 +90,7 @@ class UdpTunnelVpnService : VpnService() {
 
         fun rewriteDnsDownlink(buf: ByteArray, n: Int): ByteArray {
             if (n < 28) return buf
+            if ((buf[0].toInt() ushr 4) and 0xF != 4) return buf  // IPv4 only
             if (buf[9].toInt() and 0xFF != 17) return buf
             val ihl = (buf[0].toInt() and 0xF) * 4
             if (n < ihl + 8) return buf
@@ -98,9 +100,11 @@ class UdpTunnelVpnService : VpnService() {
             if (srcIp != PUBLIC_DNS) return buf
 
             // QR bit check — only rewrite DNS responses (bit 15 = 1)
+            // DNS header starts at ihl + 8 (after IP + UDP). QR bit is in flags byte at offset +2.
+            // DNS: [ID 2B][Flags 2B][...] → QR = bit 7 of flags[0] = dnsOff + 2
             val dnsOff = ihl + 8
-            if (n < dnsOff + 2) return buf
-            if ((buf[dnsOff].toInt() and 0x80) == 0) return buf  // it's a query
+            if (n < dnsOff + 4) return buf  // need ID (2B) + flags (2B)
+            if ((buf[dnsOff + 2].toInt() and 0x80) == 0) return buf  // QR=0 → it's a query
 
             val dstPort = ((buf[ihl + 2].toInt() and 0xFF) shl 8) or (buf[ihl + 3].toInt() and 0xFF)
             val origIp = dnsMap.remove(dstPort) ?: return buf  // single-use: remove on match

@@ -11,8 +11,8 @@ android {
         applicationId = "com.tunnely.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 42
-        versionName = "3.3.1"
+        versionCode = 43
+        versionName = "3.3.2"
     }
 
     signingConfigs {
@@ -77,4 +77,7 @@ dependencies {
 
     // JSON parsing
     implementation("org.json:json:20231013")
+
+    // Unit tests
+    testImplementation("junit:junit:4.13.2")
 }
