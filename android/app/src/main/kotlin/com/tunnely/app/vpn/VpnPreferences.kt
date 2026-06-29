@@ -53,6 +53,11 @@ class VpnPreferences(context: Context) {
         get() = prefs.getBoolean("split_tunneling", false)
         set(value) = prefs.edit().putBoolean("split_tunneling", value).apply()
 
+    // Split tunneling mode: "exclude" (default) or "include"
+    var splitMode: String
+        get() = prefs.getString("split_mode", "exclude") ?: "exclude"
+        set(value) = prefs.edit().putString("split_mode", value).apply()
+
     var splitApps: Set<String>
         get() = prefs.getStringSet("split_apps", emptySet()) ?: emptySet()
         set(value) = prefs.edit().putStringSet("split_apps", value).apply()

@@ -37,6 +37,10 @@ class SettingsFragment : Fragment() {
     private lateinit var btnPickApps: MaterialButton
     private lateinit var switchRemoteLogging: Switch
     private lateinit var textLogStatus: android.widget.TextView
+    private lateinit var layoutSplitMode: android.view.View
+    private lateinit var btnModeExclude: MaterialButton
+    private lateinit var btnModeInclude: MaterialButton
+    private lateinit var textSplitHint: android.widget.TextView
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -66,6 +70,10 @@ class SettingsFragment : Fragment() {
         btnPickApps = view.findViewById(R.id.btn_pick_apps)
         switchRemoteLogging = view.findViewById(R.id.switch_remote_logging)
         textLogStatus = view.findViewById(R.id.text_log_status)
+        layoutSplitMode = view.findViewById(R.id.layout_split_mode)
+        btnModeExclude = view.findViewById(R.id.btn_mode_exclude)
+        btnModeInclude = view.findViewById(R.id.btn_mode_include)
+        textSplitHint = view.findViewById(R.id.text_split_hint)
     }
 
     private fun loadSettings() {
@@ -83,13 +91,29 @@ class SettingsFragment : Fragment() {
         // MTU edit should be disabled when auto is on
         editMtu.isEnabled = !prefs.autoMtu
 
-        // App picker should be disabled when split tunneling is off
-        btnPickApps.isEnabled = prefs.splitTunneling
+        // Split tunneling mode UI
+        val splitOn = prefs.splitTunneling
+        layoutSplitMode.visibility = if (splitOn) android.view.View.VISIBLE else android.view.View.GONE
+        textSplitHint.visibility = if (splitOn) android.view.View.VISIBLE else android.view.View.GONE
+        btnPickApps.isEnabled = splitOn
+        updateModeButtons(prefs.splitMode)
         updatePickAppsButtonText(prefs)
 
         // Remote logging
         switchRemoteLogging.isChecked = prefs.remoteLogging
         updateLogStatusText(prefs.remoteLogging)
+    }
+
+    private fun updateModeButtons(mode: String) {
+        // Store mode as tag on layout for saveSettings to read
+        layoutSplitMode.tag = mode
+        if (mode == "exclude") {
+            btnModeExclude.setBackgroundColor(com.google.android.material.color.MaterialColors.getColor(btnModeExclude, com.google.android.material.R.attr.colorSecondaryContainer))
+            btnModeInclude.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+        } else {
+            btnModeExclude.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            btnModeInclude.setBackgroundColor(com.google.android.material.color.MaterialColors.getColor(btnModeInclude, com.google.android.material.R.attr.colorSecondaryContainer))
+        }
     }
 
     private fun setupListeners() {
@@ -99,6 +123,16 @@ class SettingsFragment : Fragment() {
 
         switchSplitTunneling.setOnCheckedChangeListener { _, isChecked ->
             btnPickApps.isEnabled = isChecked
+            layoutSplitMode.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
+            textSplitHint.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
+        }
+
+        btnModeExclude.setOnClickListener {
+            updateModeButtons("exclude")
+        }
+
+        btnModeInclude.setOnClickListener {
+            updateModeButtons("include")
         }
 
         switchRemoteLogging.setOnCheckedChangeListener { _, isChecked ->
@@ -320,6 +354,7 @@ class SettingsFragment : Fragment() {
         prefs.mtu = mtu
         prefs.autoMtu = switchAutoMtu.isChecked
         prefs.splitTunneling = switchSplitTunneling.isChecked
+        prefs.splitMode = (layoutSplitMode.tag as? String) ?: "exclude"
         prefs.allowedIps = allowedIps
 
         Toast.makeText(requireContext(), "Settings saved", Toast.LENGTH_SHORT).show()

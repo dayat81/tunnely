@@ -202,18 +202,30 @@ class UdpTunnelVpnService : VpnService() {
                     builder.addDisallowedApplication(packageName)
                 } catch (_: Exception) {}
                 
-                // Use DISALLOW list (exclude selected apps) instead of ALLOW list
-                // addAllowedApplication() is unreliable for TCP on many Android devices
-                // addDisallowedApplication() is more reliable — all traffic goes through
-                // VPN EXCEPT excluded apps
-                for (pkg in prefs.splitApps) {
-                    try {
-                        builder.addDisallowedApplication(pkg)
-                    } catch (e: Exception) {
-                        RemoteLogger.w(TAG, "  Failed to exclude $pkg: ${e.message}")
+                val mode = prefs.splitMode
+                if (mode == "include") {
+                    // INCLUDE mode: only selected apps go through VPN
+                    // Uses addAllowedApplication — may have TCP issues on some devices
+                    for (pkg in prefs.splitApps) {
+                        try {
+                            builder.addAllowedApplication(pkg)
+                        } catch (e: Exception) {
+                            RemoteLogger.w(TAG, "  Failed to include $pkg: ${e.message}")
+                        }
                     }
+                    RemoteLogger.i(TAG, "  Split tunneling [include]: ${prefs.splitApps.size} apps through VPN")
+                } else {
+                    // EXCLUDE mode (default): selected apps bypass VPN, all else through VPN
+                    // Uses addDisallowedApplication — more reliable for TCP
+                    for (pkg in prefs.splitApps) {
+                        try {
+                            builder.addDisallowedApplication(pkg)
+                        } catch (e: Exception) {
+                            RemoteLogger.w(TAG, "  Failed to exclude $pkg: ${e.message}")
+                        }
+                    }
+                    RemoteLogger.i(TAG, "  Split tunneling [exclude]: ${prefs.splitApps.size} apps bypass VPN")
                 }
-                RemoteLogger.i(TAG, "  Split tunneling: excluding ${prefs.splitApps.size} apps")
             }
 
             builder.setConfigureIntent(
