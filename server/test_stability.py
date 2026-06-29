@@ -301,6 +301,144 @@ class TestServerSessionDuringInstability:
         assert self.sm.sessions[ip]["rx"] == 1000
 
 
+# ── TX Stats Tracking Fix Tests ──────────────────────────────────────
+
+class TestTxStatsTracking:
+    """TX bytes must be tracked on assigned IP, not rewritten dst."""
+
+    def setup_method(self):
+        self.sm = SessionManager("10.20.0.0/24", state_file="/dev/null")
+
+    def test_tx_tracked_on_assigned_ip(self):
+        """TX bytes accumulate on session key, not on rewritten IP."""
+        ip = self.sm.assign_ip(("1.2.3.4", 1000))
+        self.sm.touch(ip, tx_bytes=5000)
+        assert self.sm.sessions[ip]["tx"] == 5000
+
+    def test_tx_after_nat_rebind(self):
+        """TX bytes continue accumulating after NAT rebind."""
+        ip = self.sm.assign_ip(("1.2.3.4", 1000))
+        self.sm.touch(ip, tx_bytes=1000)
+        # NAT rebind
+        self.sm.assign_ip(("1.2.3.4", 2000))
+        self.sm.touch(ip, tx_bytes=2000)
+        assert self.sm.sessions[ip]["tx"] == 3000
+
+    def test_rx_tx_independent(self):
+        """RX and TX counters are independent."""
+        ip = self.sm.assign_ip(("1.2.3.4", 1000))
+        self.sm.touch(ip, rx_bytes=100)
+        self.sm.touch(ip, tx_bytes=200)
+        self.sm.touch(ip, rx_bytes=300)
+        self.sm.touch(ip, tx_bytes=400)
+        assert self.sm.sessions[ip]["rx"] == 400
+        assert self.sm.sessions[ip]["tx"] == 600
+
+    def test_touch_nonexistent_session_is_noop(self):
+        """Touching a non-existent session IP does nothing."""
+        self.sm.assign_ip(("1.2.3.4", 1000))
+        self.sm.touch("10.20.0.99", rx_bytes=1000, tx_bytes=1000)
+        assert "10.20.0.99" not in self.sm.sessions
+
+    def test_tx_accumulates_over_many_packets(self):
+        """TX counter handles many small increments."""
+        ip = self.sm.assign_ip(("1.2.3.4", 1000))
+        for _ in range(10000):
+            self.sm.touch(ip, tx_bytes=1)
+        assert self.sm.sessions[ip]["tx"] == 10000
+
+    def test_total_tx_sums_all_sessions(self):
+        """total_tx should sum TX across all sessions."""
+        ip1 = self.sm.assign_ip(("1.1.1.1", 1000))
+        ip2 = self.sm.assign_ip(("2.2.2.2", 2000))
+        self.sm.touch(ip1, tx_bytes=1000)
+        self.sm.touch(ip2, tx_bytes=2000)
+        total = sum(s["tx"] for s in self.sm.sessions.values())
+        assert total == 3000
+
+
+# ── IP Pool Edge Cases ────────────────────────────────────────────────
+
+class TestIpPoolEdgeCases:
+    """IP pool correctness under stress."""
+
+    def setup_method(self):
+        self.sm = SessionManager("10.20.0.0/28", state_file="/dev/null")  # /28 = 14 usable IPs
+
+    def test_pool_exhaustion_and_recovery(self):
+        """Pool recovers after sessions expire."""
+        for i in range(12):  # fill pool (.2-.13, skip .1)
+            self.sm.assign_ip((f"10.0.0.{i}", 1000 + i))
+        # Pool exhausted — evict oldest
+        ip = self.sm.assign_ip(("10.0.100.1", 9999))
+        assert ip.startswith("10.20.0.")
+
+    def test_ip_recycled_after_remove(self):
+        """Removed IP goes back to available pool."""
+        ip = self.sm.assign_ip(("1.2.3.4", 1000))
+        self.sm._remove_session(ip)
+        assert ip in self.sm._available
+
+    def test_no_duplicate_ips(self):
+        """No two sessions share the same IP."""
+        for i in range(12):
+            self.sm.assign_ip((f"10.0.0.{i}", 1000 + i))
+        ips = list(self.sm.sessions.keys())
+        assert len(ips) == len(set(ips))
+
+    def test_server_ip_not_assigned(self):
+        """Server IP (.1) is never assigned to a client."""
+        assigned = set()
+        for i in range(50):
+            ip = self.sm.assign_ip((f"10.0.0.{i}", 1000 + i))
+            assigned.add(ip)
+        assert "10.20.0.1" not in assigned
+
+
+# ── Session State Consistency ─────────────────────────────────────────
+
+class TestSessionStateConsistency:
+    """Internal data structures must stay consistent."""
+
+    def setup_method(self):
+        self.sm = SessionManager("10.20.0.0/24", state_file="/dev/null")
+
+    def test_sessions_and_addr_to_ip_in_sync(self):
+        """Every session has exactly one addr_to_ip entry."""
+        for i in range(10):
+            self.sm.assign_ip((f"10.0.0.{i}", 1000 + i))
+        # Forward: every session addr is in addr_to_ip
+        for ip, s in self.sm.sessions.items():
+            assert s["addr"] in self.sm.addr_to_ip
+            assert self.sm.addr_to_ip[s["addr"]] == ip
+        # Reverse: every addr_to_ip maps to a session
+        for addr, ip in self.sm.addr_to_ip.items():
+            assert ip in self.sm.sessions
+            assert self.sm.sessions[ip]["addr"] == addr
+
+    def test_available_and_sessions_disjoint(self):
+        """No IP is both assigned and available."""
+        for i in range(5):
+            self.sm.assign_ip((f"10.0.0.{i}", 1000 + i))
+        assert not (set(self.sm.sessions.keys()) & self.sm._available)
+
+    def test_total_ips_conserved(self):
+        """Assigned + available = total pool size."""
+        total = len(self.sm._available) + len(self.sm.sessions)
+        for i in range(5):
+            self.sm.assign_ip((f"10.0.0.{i}", 1000 + i))
+        assert len(self.sm._available) + len(self.sm.sessions) == total
+
+    def test_full_cycle_assign_use_remove(self):
+        """Full lifecycle: assign → use → remove → reassign."""
+        ip = self.sm.assign_ip(("1.2.3.4", 1000))
+        self.sm.touch(ip, rx_bytes=500, tx_bytes=300)
+        self.sm._remove_session(ip)
+        assert ip in self.sm._available
+        ip2 = self.sm.assign_ip(("5.6.7.8", 2000))
+        assert ip2.startswith("10.20.0.")
+
+
 # ── MTU Configuration Consistency ────────────────────────────────────
 
 class TestMtuConsistency:

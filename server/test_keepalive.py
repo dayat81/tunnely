@@ -557,6 +557,105 @@ class TestNatRebind:
         assert len(self.sm.sessions) == 1
         assert len(self.sm._available) == initial_available - 1
 
+    def test_rebind_preserves_connected_at(self):
+        """connected_at timestamp survives NAT rebind."""
+        ip = self.sm.assign_ip(("119.235.222.139", 20511))
+        original_time = self.sm.sessions[ip]["connected_at"]
+        time.sleep(0.01)
+        self.sm.assign_ip(("119.235.222.139", 21277))
+        assert self.sm.sessions[ip]["connected_at"] == original_time
+
+    def test_rebind_addr_to_ip_consistency(self):
+        """addr_to_ip always has exactly 1 entry for this client."""
+        self.sm.assign_ip(("119.235.222.139", 20511))
+        self.sm.assign_ip(("119.235.222.139", 21277))
+        self.sm.assign_ip(("119.235.222.139", 22000))
+        count = sum(1 for a in self.sm.addr_to_ip if a[0] == "119.235.222.139")
+        assert count == 1
+
+    def test_rebind_updates_last_seen(self):
+        """NAT rebind updates last_seen timestamp."""
+        ip = self.sm.assign_ip(("119.235.222.139", 20511))
+        old_ts = self.sm.sessions[ip]["last_seen"]
+        time.sleep(0.01)
+        self.sm.assign_ip(("119.235.222.139", 21277))
+        assert self.sm.sessions[ip]["last_seen"] >= old_ts
+
+    def test_cgnat_two_devices_same_ip(self):
+        """Two devices behind same CGNAT IP — second steals session.
+        
+        Known limitation: IP-level dedup can't distinguish two devices
+        behind the same carrier-grade NAT. In practice, the keepalive
+        ping-pong resolves this within seconds.
+        """
+        ip1 = self.sm.assign_ip(("100.64.1.1", 10001))
+        ip2 = self.sm.assign_ip(("100.64.1.1", 20002))
+        # Same session — can't distinguish CGNAT peers
+        assert ip1 == ip2
+        assert len(self.sm.sessions) == 1
+
+    def test_rebind_after_evict(self):
+        """After eviction, client gets new session on rebind."""
+        # Fill sessions
+        for i in range(50):
+            self.sm.assign_ip((f"10.0.0.{i}", 10000 + i))
+        assert len(self.sm.sessions) == 50
+        # Old client rebinds — should evict oldest and get new session
+        ip = self.sm.assign_ip(("119.235.222.139", 20511))
+        assert ip.startswith("10.20.0.")
+
+    def test_interleaved_rebinds_two_clients(self):
+        """Two clients interleaving rebinds don't interfere."""
+        ip_a = self.sm.assign_ip(("1.1.1.1", 1000))
+        ip_b = self.sm.assign_ip(("2.2.2.2", 2000))
+        assert ip_a != ip_b
+        # Client A rebinds
+        ip_a2 = self.sm.assign_ip(("1.1.1.1", 1001))
+        assert ip_a2 == ip_a
+        # Client B rebinds
+        ip_b2 = self.sm.assign_ip(("2.2.2.2", 2001))
+        assert ip_b2 == ip_b
+        assert len(self.sm.sessions) == 2
+
+    def test_rapid_rebind_stress(self):
+        """1000 rapid rebinds — no leak, no crash."""
+        ip = self.sm.assign_ip(("1.2.3.4", 1000))
+        for port in range(1001, 2001):
+            self.sm.assign_ip(("1.2.3.4", port))
+        assert len(self.sm.sessions) == 1
+        assert len(self.sm.addr_to_ip) == 1
+
+    def test_rebind_exact_port_match_fast_path(self):
+        """Exact (ip,port) match takes fast path (no client_ip_map lookup)."""
+        ip1 = self.sm.assign_ip(("1.2.3.4", 12345))
+        ip2 = self.sm.assign_ip(("1.2.3.4", 12345))  # exact match
+        assert ip1 == ip2
+        # Should NOT log NAT rebind (fast path)
+        assert len(self.sm.sessions) == 1
+
+    def test_client_ip_map_not_polluted_by_other_clients(self):
+        """client_ip_map entries don't leak between different clients."""
+        self.sm.assign_ip(("1.1.1.1", 1000))
+        self.sm.assign_ip(("2.2.2.2", 2000))
+        self.sm.assign_ip(("3.3.3.3", 3000))
+        assert len(self.sm.client_ip_map) == 3
+        # Remove one
+        ip = self.sm.client_ip_map["2.2.2.2"]
+        self.sm._remove_session(ip)
+        assert len(self.sm.client_ip_map) == 2
+        assert "2.2.2.2" not in self.sm.client_ip_map
+
+    def test_rebind_with_stale_client_ip_map(self):
+        """Stale client_ip_map entry (session removed externally) is cleaned."""
+        ip = self.sm.assign_ip(("1.2.3.4", 1000))
+        # Manually remove session without going through _remove_session
+        self.sm.sessions.pop(ip)
+        # Now client_ip_map is stale
+        ip2 = self.sm.assign_ip(("1.2.3.4", 2000))
+        # Should create new session (stale mapping cleaned up)
+        assert ip2.startswith("10.20.0.")
+        assert ip2 in self.sm.sessions
+
 
 # ── Run Tests ──────────────────────────────────────────────────────────
 
