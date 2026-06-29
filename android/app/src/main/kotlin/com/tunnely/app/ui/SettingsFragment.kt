@@ -107,13 +107,35 @@ class SettingsFragment : Fragment() {
     private fun updateModeButtons(mode: String) {
         // Store mode as tag on layout for saveSettings to read
         layoutSplitMode.tag = mode
+        val ctx = requireContext()
         if (mode == "exclude") {
-            btnModeExclude.setBackgroundColor(com.google.android.material.color.MaterialColors.getColor(btnModeExclude, com.google.android.material.R.attr.colorSecondaryContainer))
+            // Exclude = FILLED (active, primary color)
+            btnModeExclude.isSelected = true
+            btnModeInclude.isSelected = false
+            btnModeExclude.setBackgroundColor(com.google.android.material.color.MaterialColors.getColor(btnModeExclude, com.google.android.material.R.attr.colorPrimary, android.graphics.Color.BLUE))
+            btnModeExclude.setTextColor(com.google.android.material.color.MaterialColors.getColor(btnModeExclude, com.google.android.material.R.attr.colorOnPrimary, android.graphics.Color.WHITE))
+            btnModeExclude.strokeWidth = 0
+            // Include = OUTLINED (inactive)
             btnModeInclude.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            btnModeInclude.setTextColor(com.google.android.material.color.MaterialColors.getColor(btnModeInclude, com.google.android.material.R.attr.colorOnSurfaceVariant, android.graphics.Color.GRAY))
+            btnModeInclude.strokeWidth = 2
         } else {
+            // Exclude = OUTLINED (inactive)
+            btnModeExclude.isSelected = false
+            btnModeInclude.isSelected = true
             btnModeExclude.setBackgroundColor(android.graphics.Color.TRANSPARENT)
-            btnModeInclude.setBackgroundColor(com.google.android.material.color.MaterialColors.getColor(btnModeInclude, com.google.android.material.R.attr.colorSecondaryContainer))
+            btnModeExclude.setTextColor(com.google.android.material.color.MaterialColors.getColor(btnModeExclude, com.google.android.material.R.attr.colorOnSurfaceVariant, android.graphics.Color.GRAY))
+            btnModeExclude.strokeWidth = 2
+            // Include = FILLED (active, primary color)
+            btnModeInclude.setBackgroundColor(com.google.android.material.color.MaterialColors.getColor(btnModeInclude, com.google.android.material.R.attr.colorPrimary, android.graphics.Color.BLUE))
+            btnModeInclude.setTextColor(com.google.android.material.color.MaterialColors.getColor(btnModeInclude, com.google.android.material.R.attr.colorOnPrimary, android.graphics.Color.WHITE))
+            btnModeInclude.strokeWidth = 0
         }
+        // Add icon to active button for extra clarity
+        btnModeExclude.setCompoundDrawablesRelativeWithIntrinsicBounds(
+            if (mode == "exclude") android.R.drawable.ic_menu_close_clear_cancel else 0, 0, 0, 0)
+        btnModeInclude.setCompoundDrawablesRelativeWithIntrinsicBounds(
+            if (mode == "include") android.R.drawable.ic_menu_add else 0, 0, 0, 0)
     }
 
     private fun setupListeners() {

@@ -248,6 +248,8 @@
                         android:text="Exclude"
                         android:textSize="12sp"
                         android:layout_marginEnd="4dp"
+                        app:strokeColor="?attr/colorOutline"
+                        app:strokeWidth="2dp"
                         style="@style/Widget.Material3.Button.TonalButton" />
 
                     <com.google.android.material.button.MaterialButton
@@ -258,6 +260,8 @@
                         android:text="Include"
                         android:textSize="12sp"
                         android:layout_marginStart="4dp"
+                        app:strokeColor="?attr/colorOutline"
+                        app:strokeWidth="2dp"
                         style="@style/Widget.Material3.Button.OutlinedButton" />
                 </LinearLayout>
 
