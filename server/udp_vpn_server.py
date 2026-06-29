@@ -34,13 +34,13 @@ import select
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
-__version__ = "3.6.0"
+__version__ = "3.7.0"
 
 TUNSETIFF = 0x400454CA
 IFF_TUN = 0x0001
 IFF_NO_PI = 0x1000  # no packet info header
 
-IDLE_TIMEOUT = 180
+IDLE_TIMEOUT = 60  # seconds — clean stale sessions fast
 BUFFER_SIZE = 65535
 MAX_BATCH = 64  # max packets to drain per fd per select()
 STATS_INTERVAL = 30
@@ -482,9 +482,9 @@ class UdpVpnServer:
             # Periodic tasks
             if now - self.last_stats >= STATS_INTERVAL:
                 self._print_stats()
+                self.sessions.cleanup()  # cleanup with every stats print
                 self.last_stats = now
             if now - self.last_save >= 60:
-                self.sessions.cleanup()
                 self.sessions.save_state()
                 self.last_save = now
 
@@ -577,7 +577,7 @@ class UdpVpnServer:
             self._forward_dns(data, dst_ip, assigned_ip, addr)
             return
 
-        # Periodic debug: log protocol breakdown
+        # Log protocol breakdown (sampled)
         proto = data[9] if len(data) > 9 else -1
         proto_name = {1: "ICMP", 6: "TCP", 17: "UDP"}.get(proto, f"P{proto}")
         if self._should_debug_log():
@@ -597,7 +597,14 @@ class UdpVpnServer:
 
         client_addr = self.sessions.get_addr_by_ip(dst_ip)
         if client_addr:
-            # Debug: log response packets
+            # Rewrite dst IP from assigned IP back to client's TUN IP (10.20.0.2)
+            # Without this, the client kernel drops packets with dst != 10.20.0.2
+            CLIENT_TUN_IP = "10.20.0.2"
+            if dst_ip != CLIENT_TUN_IP:
+                data = self._rewrite_dst_ip(data, CLIENT_TUN_IP)
+                dst_ip = CLIENT_TUN_IP
+
+            # Debug: log response packets (sampled)
             src_ip = extract_src_ip(data)
             proto = data[9] if len(data) > 9 else -1
             proto_name = {1: "ICMP", 6: "TCP", 17: "UDP"}.get(proto, f"P{proto}")
@@ -609,6 +616,12 @@ class UdpVpnServer:
                 self.sessions.touch(dst_ip, tx_bytes=len(data))
             except socket.error as e:
                 log(f"UDP send error to {dst_ip}: {e}", "WARN")
+        else:
+            # No client for this TUN packet — log it
+            src_ip = extract_src_ip(data)
+            proto = data[9] if len(data) > 9 else -1
+            proto_name = {1: "ICMP", 6: "TCP", 17: "UDP"}.get(proto, f"P{proto}")
+            log(f"  [ORPHAN] {src_ip}→{dst_ip} {proto_name} {len(data)}B (no client)", "WARN")
 
     _debug_counter = 0
     def _should_debug_log(self) -> bool:
@@ -765,6 +778,46 @@ class UdpVpnServer:
                 udp_cksum_off = ihl + 6
                 if pkt[udp_cksum_off] != 0 or pkt[udp_cksum_off + 1] != 0:
                     self._incremental_checksum_fix(pkt, udp_cksum_off, old_src, new_ip_bytes)
+
+        return bytes(pkt)
+
+    def _rewrite_dst_ip(self, packet: bytes, new_ip: str) -> bytes:
+        """Rewrite destination IP and fix ALL checksums (IP header + TCP/UDP transport).
+        
+        Used to rewrite reply packets from assigned IP back to client's TUN IP (10.20.0.2).
+        """
+        pkt = bytearray(packet)
+        new_ip_bytes = _aton(new_ip)
+        old_dst = bytes(pkt[16:20])
+
+        # Skip if no change needed
+        if old_dst == new_ip_bytes:
+            return bytes(pkt)
+
+        # ── Fix IP header checksum ──
+        pkt[10:12] = b"\x00\x00"
+        pkt[16:20] = new_ip_bytes
+        ihl = (pkt[0] & 0x0F) * 4
+        ip_sum = 0
+        for i in range(0, min(ihl, len(pkt)), 2):
+            ip_sum += pkt[i] << 8 | pkt[i + 1]
+        while ip_sum >> 16:
+            ip_sum = (ip_sum & 0xFFFF) + (ip_sum >> 16)
+        pkt[10:12] = (~ip_sum & 0xFFFF).to_bytes(2, "big")
+
+        # ── Fix transport checksum (TCP/UDP) using RFC 1624 incremental update ──
+        if len(pkt) >= 20:
+            protocol = pkt[9]
+            ihl = (pkt[0] & 0x0F) * 4
+
+            if protocol == 6 and len(pkt) >= ihl + 18:
+                # TCP: checksum at offset 16 from TCP header
+                self._incremental_checksum_fix(pkt, ihl + 16, old_dst, new_ip_bytes)
+            elif protocol == 17 and len(pkt) >= ihl + 8:
+                # UDP: checksum at offset 6 from UDP header (skip if 0 = no checksum)
+                udp_cksum_off = ihl + 6
+                if pkt[udp_cksum_off] != 0 or pkt[udp_cksum_off + 1] != 0:
+                    self._incremental_checksum_fix(pkt, udp_cksum_off, old_dst, new_ip_bytes)
 
         return bytes(pkt)
 

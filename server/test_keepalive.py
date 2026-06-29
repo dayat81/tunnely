@@ -9,7 +9,7 @@ Tests:
 - New session assignment on first hello
 - Keepalive packet format (exactly 4 bytes)
 - Edge cases: oversized keepalive, empty, 3 bytes, 5 bytes
-- Session timeout behavior (IDLE_TIMEOUT = 180s)
+- Session timeout behavior (IDLE_TIMEOUT = 60s)
 - Keepalive interval vs NAT timeout (15s < 30-60s carrier NAT)
 - Multiple keepalives extend session lifetime
 - Keepalive from different addr (NAT rebinding / roaming)
@@ -193,13 +193,13 @@ class TestSessionTimeout:
         )
 
     def test_keepalive_interval_vs_idle_timeout(self):
-        """Keepalive interval (15s) must be < server IDLE_TIMEOUT (180s)."""
+        """Keepalive interval (15s) must be < server IDLE_TIMEOUT (60s)."""
         assert KEEPALIVE_INTERVAL < IDLE_TIMEOUT
 
     def test_idle_timeout_value(self):
-        """IDLE_TIMEOUT should be 180s (enough for 12 keepalive cycles)."""
-        assert IDLE_TIMEOUT == 180
-        assert IDLE_TIMEOUT / KEEPALIVE_INTERVAL >= 10  # at least 10 chances
+        """IDLE_TIMEOUT should be 60s (enough for 4 keepalive cycles)."""
+        assert IDLE_TIMEOUT == 60
+        assert IDLE_TIMEOUT / KEEPALIVE_INTERVAL >= 3  # at least 3 chances
 
 
 # ── NAT Timeout Scenario Tests ────────────────────────────────────────
@@ -213,8 +213,8 @@ class TestNatTimeoutScenarios:
     def test_no_keepalive_session_dies(self):
         """Without keepalive, session expires after IDLE_TIMEOUT."""
         ip = self.sm.assign_ip(("1.2.3.4", 12345))
-        # Simulate 3 minutes of silence (no keepalive)
-        self.sm.sessions[ip]["last_seen"] = time.time() - 181
+        # Simulate silence (no keepalive)
+        self.sm.sessions[ip]["last_seen"] = time.time() - 61
         self.sm.cleanup()
         assert ip not in self.sm.sessions
 
@@ -228,23 +228,23 @@ class TestNatTimeoutScenarios:
             assert ip in self.sm.sessions
 
     def test_missing_keepalive_for_60s_ok(self):
-        """Missing keepalive for 60s is OK (within 180s timeout)."""
+        """Missing keepalive for 30s is OK (within 60s timeout)."""
         ip = self.sm.assign_ip(("1.2.3.4", 12345))
-        self.sm.sessions[ip]["last_seen"] = time.time() - 60
+        self.sm.sessions[ip]["last_seen"] = time.time() - 30
         self.sm.cleanup()
         assert ip in self.sm.sessions  # still alive
 
     def test_missing_keepalive_for_120s_ok(self):
-        """Missing keepalive for 120s is still OK (within 180s)."""
+        """Missing keepalive for 45s is still OK (within 60s)."""
         ip = self.sm.assign_ip(("1.2.3.4", 12345))
-        self.sm.sessions[ip]["last_seen"] = time.time() - 120
+        self.sm.sessions[ip]["last_seen"] = time.time() - 45
         self.sm.cleanup()
         assert ip in self.sm.sessions
 
     def test_missing_keepalive_for_181s_dies(self):
-        """Missing keepalive for 181s → session expired."""
+        """Missing keepalive for 61s → session expired."""
         ip = self.sm.assign_ip(("1.2.3.4", 12345))
-        self.sm.sessions[ip]["last_seen"] = time.time() - 181
+        self.sm.sessions[ip]["last_seen"] = time.time() - 61
         self.sm.cleanup()
         assert ip not in self.sm.sessions
 
@@ -257,9 +257,9 @@ class TestNatTimeoutScenarios:
         assert ip in self.sm.sessions  # server still has it
 
     def test_carrier_nat_timeout_60s(self):
-        """Carrier NAT timeout at 60s — server session still alive."""
+        """Carrier NAT timeout at 50s — server session still alive."""
         ip = self.sm.assign_ip(("1.2.3.4", 12345))
-        self.sm.sessions[ip]["last_seen"] = time.time() - 60
+        self.sm.sessions[ip]["last_seen"] = time.time() - 50
         self.sm.cleanup()
         assert ip in self.sm.sessions
 

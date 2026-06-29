@@ -711,8 +711,8 @@ class TestProtocolConstants:
     def test_iff_no_pi_value(self):
         assert IFF_NO_PI == 0x1000
 
-    def test_idle_timeout_is_180(self):
-        assert IDLE_TIMEOUT == 180
+    def test_idle_timeout_is_60(self):
+        assert IDLE_TIMEOUT == 60
 
     def test_private_dns_ips_count(self):
         assert len(PRIVATE_DNS_IPS) == 3
