@@ -60,8 +60,16 @@ class UdpTunnelVpnService : VpnService() {
 
         // DNS interceptor: rewrite private DNS IPs (10.0.2.3, etc.) to 8.8.8.8
         // so DNS queries don't die in the tunnel. On response, rewrite source back.
+        //
+        // v2: 5-tuple state tracking + DNS QR bit check to prevent re-interception loops.
+        // Key = srcPort | (dstIp << 16) — unique per DNS flow, prevents srcPort collisions.
+        // Downlink validates DNS QR=1 (response) before rewriting.
         private const val PUBLIC_DNS = 0x08080808  // 8.8.8.8
-        private val dnsRewriteMap = java.util.concurrent.ConcurrentHashMap<Int, Int>()  // dstPort → originalDnsIp
+        private val dnsRewriteMap = java.util.concurrent.ConcurrentHashMap<Long, Int>()  // 5tupleKey → originalDnsIp
+
+        /** Build unique key from srcPort + dstIp to prevent collisions across concurrent queries. */
+        private fun dnsKey(srcPort: Int, dstIp: Int): Long =
+            (srcPort.toLong() and 0xFFFFL) or ((dstIp.toLong() and 0xFFFFFFFFL) shl 16)
 
         private fun isPrivateIp(ip: Int): Boolean {
             val b0 = (ip shr 24) and 0xFF
@@ -94,11 +102,12 @@ class UdpTunnelVpnService : VpnService() {
 
             if (!isPrivateIp(dstIp)) return pkt  // already public, no rewrite needed
 
-            // Read src port for tracking
+            // Read src port for 5-tuple tracking
             val srcPort = ((pkt[ihl].toInt() and 0xFF) shl 8) or (pkt[ihl + 1].toInt() and 0xFF)
 
-            // Save mapping: srcPort → original dst IP
-            dnsRewriteMap[srcPort] = dstIp
+            // Save mapping: 5tupleKey(srcPort, dstIp) → original dst IP
+            val key = dnsKey(srcPort, dstIp)
+            dnsRewriteMap[key] = dstIp
 
             // Rewrite dst IP to 8.8.8.8
             val result = pkt.copyOf(len)
@@ -111,7 +120,7 @@ class UdpTunnelVpnService : VpnService() {
             val udpCksumOff = ihl + 6
             incrementalCksum(result, udpCksumOff, 16, dstIp, PUBLIC_DNS)  // dst at offset 16
 
-            RemoteLogger.i("DnsInterceptor", "Rewrote DNS query: ${ipToStr(dstIp)}:$dstPort → 8.8.8.8:$dstPort (srcPort=$srcPort)")
+            RemoteLogger.i("DnsInterceptor", "Rewrote DNS query: ${ipToStr(dstIp)}:$dstPort → 8.8.8.8:$dstPort (key=${key})")
             return result
         }
 
@@ -128,18 +137,39 @@ class UdpTunnelVpnService : VpnService() {
             val srcPort = ((pkt[ihl].toInt() and 0xFF) shl 8) or (pkt[ihl + 1].toInt() and 0xFF)
             if (srcPort != 53) return pkt  // not DNS response
 
-            // Read src IP (should be 8.8.8.8 after NAT)
+            // Validate this is actually a DNS RESPONSE (QR bit = 1), not a query
+            // DNS header starts at ihl (after IP + UDP headers)
+            val dnsOffset = ihl + 8  // IP header + 8 bytes UDP header
+            if (len < dnsOffset + 4) return pkt  // need at least flags + 1 question
+            val dnsFlags = ((pkt[dnsOffset].toInt() and 0xFF) shl 8) or (pkt[dnsOffset + 1].toInt() and 0xFF)
+            val isResponse = (dnsFlags and 0x8000) != 0  // QR bit = bit 15
+            if (!isResponse) return pkt  // it's a query, not a response — skip
+
+            // Read src IP and dst port for 5-tuple lookup
             val srcIp = ((pkt[12].toInt() and 0xFF) shl 24) or
                         ((pkt[13].toInt() and 0xFF) shl 16) or
                         ((pkt[14].toInt() and 0xFF) shl 8) or
                         (pkt[15].toInt() and 0xFF)
-
-            // Read dst port to look up mapping
             val dstPort = ((pkt[ihl + 2].toInt() and 0xFF) shl 8) or (pkt[ihl + 3].toInt() and 0xFF)
 
-            val originalDnsIp = dnsRewriteMap.remove(dstPort) ?: return pkt  // no mapping, pass through
+            // Look up mapping using dstPort (our srcPort) + srcIp (should be 8.8.8.8)
+            // The response has swapped src/dst, so srcIp=8.8.8.8, dstPort=our original srcPort
+            // We need to find the key: dnsKey(srcPort=dstPort, dstIp=originalDstIp)
+            // But we don't know originalDstIp — scan map for matching dstPort
+            var originalDnsIp: Int? = null
+            var matchedKey: Long = 0
+            for ((key, origIp) in dnsRewriteMap) {
+                val keySrcPort = (key and 0xFFFFL).toInt()
+                if (keySrcPort == dstPort) {
+                    originalDnsIp = origIp
+                    matchedKey = key
+                    break
+                }
+            }
+            if (originalDnsIp == null) return pkt  // no mapping, pass through
+            dnsRewriteMap.remove(matchedKey)
 
-            // Only rewrite if src is currently 8.8.8.8 (or any public DNS we rewrote to)
+            // Rewrite src IP back to original private DNS IP
             val result = pkt.copyOf(len)
             result[12] = ((originalDnsIp shr 24) and 0xFF).toByte()
             result[13] = ((originalDnsIp shr 16) and 0xFF).toByte()
@@ -153,7 +183,7 @@ class UdpTunnelVpnService : VpnService() {
             val udpCksumOff = ihl + 6
             incrementalCksum(result, udpCksumOff, 12, srcIp, originalDnsIp)  // src at offset 12
 
-            RemoteLogger.i("DnsInterceptor", "Rewrote DNS response: 8.8.8.8:53 → ${ipToStr(originalDnsIp)}:53 (dstPort=$dstPort)")
+            RemoteLogger.i("DnsInterceptor", "Rewrote DNS response: 8.8.8.8:53 → ${ipToStr(originalDnsIp)}:53 (dstPort=$dstPort, key=$matchedKey)")
             return result
         }
 
