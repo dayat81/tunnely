@@ -155,7 +155,7 @@ class SettingsFragment : Fragment() {
             .create()
 
         loadingDialog.setOnCancelListener {
-            btnPickApps.isEnabled = prefs.splitTunneling
+            btnPickApps.isEnabled = switchSplitTunneling.isChecked
         }
         loadingDialog.show()
 
@@ -172,13 +172,12 @@ class SettingsFragment : Fragment() {
 
             // Fragment may have been detached during loading
             if (!isAdded || !loadingDialog.isShowing) {
-                btnPickApps.isEnabled = prefs.splitTunneling
+                btnPickApps.isEnabled = switchSplitTunneling.isChecked
                 return@launch
             }
 
             loadingDialog.dismiss()
             showAppPickerDialogWithData(installedApps, prefs)
-            btnPickApps.isEnabled = prefs.splitTunneling
         }
     }
 
@@ -259,6 +258,12 @@ class SettingsFragment : Fragment() {
         // Prevent keyboard from auto-opening (another focus leak source)
         dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN)
         dialog.show()
+
+        // Re-enable button + update count when dialog is dismissed (Save/Cancel/Clear)
+        dialog.setOnDismissListener {
+            btnPickApps.isEnabled = switchSplitTunneling.isChecked
+            updatePickAppsButtonText(prefs)
+        }
 
         // Now that dialog owns the window, enable search field focus safely
         searchEdit.post {
