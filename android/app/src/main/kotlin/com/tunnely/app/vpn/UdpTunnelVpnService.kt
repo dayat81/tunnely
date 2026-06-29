@@ -53,7 +53,7 @@ class UdpTunnelVpnService : VpnService() {
         private const val NOTIFICATION_CHANNEL_ID = "tunnely_udp_vpn"
         private const val NOTIFICATION_ID = 1
 
-        private const val TUNNEL_PORT = 5555
+        private const val TUNNEL_PORT = 8770
         private const val TUNNEL_MTU = 1500
         private const val KEEPALIVE_INTERVAL = 15_000L // 15s
         private const val MAX_PACKET = 32767
