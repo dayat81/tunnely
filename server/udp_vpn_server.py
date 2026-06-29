@@ -264,7 +264,10 @@ def extract_udp_dst_port(packet: bytes) -> int | None:
         return None
     if packet[9] != 17:  # UDP
         return None
-    return (packet[22] << 8) | packet[23]
+    ihl = (packet[0] & 0x0F) * 4
+    if len(packet) < ihl + 4:  # need at least 4 bytes of UDP header
+        return None
+    return (packet[ihl + 2] << 8) | packet[ihl + 3]
 
 
 def extract_udp_payload(packet: bytes) -> bytes | None:
