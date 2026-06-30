@@ -64,6 +64,7 @@ class ConnectFragment : Fragment() {
     private lateinit var trafficTx: TextView
     private lateinit var durationText: TextView
     private lateinit var trafficCard: View
+    private lateinit var versionText: TextView
 
     private var pulseAnimator: ObjectAnimator? = null
     private var connectStartTime: Long = 0
@@ -104,6 +105,7 @@ class ConnectFragment : Fragment() {
         trafficTx = view.findViewById(R.id.traffic_tx)
         durationText = view.findViewById(R.id.duration_text)
         trafficCard = view.findViewById(R.id.traffic_card)
+        versionText = view.findViewById(R.id.version_text)
     }
 
     private fun setupClickListeners() {
@@ -239,6 +241,14 @@ class ConnectFragment : Fragment() {
         serverEndpoint.text = "${prefs.serverAddress}:8770"
         serverPubkey.text = "UDP Tunnel (no keys)"
         tunnelIp.text = prefs.tunnelAddress.ifEmpty { "Auto-assigned" }
+
+        // Show app version
+        try {
+            val pInfo = requireContext().packageManager.getPackageInfo(requireContext().packageName, 0)
+            versionText.text = "Tunnely v${pInfo.versionName}"
+        } catch (_: Exception) {
+            versionText.text = "Tunnely"
+        }
     }
 
     private fun startConnect() {
