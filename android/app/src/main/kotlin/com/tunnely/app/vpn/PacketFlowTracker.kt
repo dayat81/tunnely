@@ -40,7 +40,10 @@ object PacketFlowTracker {
         val flowDomains = flows.values
             .sortedByDescending { it.uplinkBytes + it.downlinkBytes }
             .take(3)
-            .map { f -> "${f.remoteIp}:${f.remotePort}=${f.domain ?: "NULL"}" }
+            .map { f ->
+                val cached = DomainCache.getDomain(f.remoteIp)
+                "${f.remoteIp}:${f.remotePort} domain=${f.domain ?: "NULL"} cached=${cached ?: "NULL"}"
+            }
             .joinToString("; ")
         return "packets=$totalPacketsProcessed, uplinkTcp=$uplinkTcpPackets, " +
             "sniExtracted=$sniDomainsExtracted, cacheHits=$cacheHits, " +
