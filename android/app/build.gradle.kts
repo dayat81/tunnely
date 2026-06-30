@@ -11,8 +11,8 @@ android {
         applicationId = "com.tunnely.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 60
-        versionName = "3.13.2"
+        versionCode = 61
+        versionName = "3.13.3"
     }
 
     signingConfigs {
@@ -80,4 +80,6 @@ dependencies {
 
     // Unit tests
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.mockito:mockito-core:5.11.0")
+    testImplementation("org.mockito.kotlin:mockito-kotlin:5.3.1")
 }

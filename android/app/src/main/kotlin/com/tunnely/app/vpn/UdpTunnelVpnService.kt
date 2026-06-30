@@ -204,14 +204,18 @@ class UdpTunnelVpnService : VpnService() {
                 } catch (_: Exception) {}
                 
                 val mode = prefs.splitMode
+                RemoteLogger.i(TAG, "  Split mode from prefs: '$mode'")
+                RemoteLogger.i(TAG, "  Split apps: ${prefs.splitApps}")
+                
                 if (mode == "include") {
                     // INCLUDE mode: only selected apps go through VPN
                     // Uses addAllowedApplication — may have TCP issues on some devices
                     for (pkg in prefs.splitApps) {
                         try {
                             builder.addAllowedApplication(pkg)
+                            RemoteLogger.i(TAG, "  ✅ Allowed: $pkg")
                         } catch (e: Exception) {
-                            RemoteLogger.w(TAG, "  Failed to include $pkg: ${e.message}")
+                            RemoteLogger.w(TAG, "  ❌ Failed to include $pkg: ${e.message}")
                         }
                     }
                     RemoteLogger.i(TAG, "  Split tunneling [include]: ${prefs.splitApps.size} apps through VPN")
@@ -221,12 +225,15 @@ class UdpTunnelVpnService : VpnService() {
                     for (pkg in prefs.splitApps) {
                         try {
                             builder.addDisallowedApplication(pkg)
+                            RemoteLogger.i(TAG, "  ✅ Disallowed: $pkg")
                         } catch (e: Exception) {
-                            RemoteLogger.w(TAG, "  Failed to exclude $pkg: ${e.message}")
+                            RemoteLogger.w(TAG, "  ❌ Failed to exclude $pkg: ${e.message}")
                         }
                     }
                     RemoteLogger.i(TAG, "  Split tunneling [exclude]: ${prefs.splitApps.size} apps bypass VPN")
                 }
+            } else {
+                RemoteLogger.i(TAG, "  Split tunneling disabled or no apps selected (splitTunneling=${prefs.splitTunneling}, apps=${prefs.splitApps.size})")
             }
 
             builder.setConfigureIntent(
