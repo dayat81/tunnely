@@ -58,7 +58,7 @@ PRIVATE_DNS_IPS = {"10.0.2.3", "10.0.2.2", "10.0.3.3"}
 TLTP_MAGIC = b"\x54\x4C\x54\x50"  # "TLTP" = Tunnely Latency Test Packet
 PROBE_REQUEST = 0x01
 PROBE_RESPONSE = 0x02
-PROBE_SIZE = 24
+PROBE_SIZE = 32
 
 STATE_FILE = "/var/lib/tunnely/sessions.json"
 LOG_FILE = "/var/log/tunnely-udp-vpn.log"
@@ -597,14 +597,16 @@ class UdpVpnServer:
     def _process_udp_packet(self, data: bytes, addr):
         """Process a single UDP packet from client → write to TUN."""
 
-        # Handle latency probe (magic "TLTP" = 0x544C5450) — 24 bytes
+        # Handle latency probe (magic "TLTP" = 0x544C5450) — 32 bytes
         if len(data) == PROBE_SIZE and data[0:4] == TLTP_MAGIC:
             probe_type = data[4]
             if probe_type == PROBE_REQUEST:
-                now_us = int(time.time() * 1_000_000)
+                recv_us = int(time.time() * 1_000_000)
                 response = bytearray(data)
                 response[4] = PROBE_RESPONSE
-                struct.pack_into(">q", response, 16, now_us)
+                struct.pack_into(">q", response, 16, recv_us)  # server recv timestamp
+                echo_us = int(time.time() * 1_000_000)
+                struct.pack_into(">q", response, 24, echo_us)  # server echo timestamp
                 try:
                     self.sock.sendto(bytes(response), addr)
                 except socket.error:

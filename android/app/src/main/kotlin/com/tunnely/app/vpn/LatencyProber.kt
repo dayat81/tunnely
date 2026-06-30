@@ -4,21 +4,22 @@ import java.nio.ByteBuffer
 
 /**
  * Latency probe: client sends timestamped packets to server,
- * server echoes them back with its own receive timestamp.
+ * server echoes them back with its own receive + echo timestamps.
  *
- * Wire format (24 bytes):
+ * Wire format (32 bytes):
  *   [0-3]  Magic: 0x544C5450 ("TLTP")
  *   [4]    Type: 0x01=REQUEST, 0x02=RESPONSE
  *   [5]    Reserved
  *   [6-7]  Sequence (uint16)
- *   [8-15] Client send timestamp (microseconds)
+ *   [8-15] Client send timestamp (microseconds, wall clock)
  *   [16-23] Server receive timestamp (microseconds, 0 in request)
+ *   [24-31] Server echo timestamp (microseconds, 0 in request)
  */
 object LatencyProber {
     const val MAGIC = 0x544C5450  // "TLTP"
     const val TYPE_REQUEST: Byte = 0x01
     const val TYPE_RESPONSE: Byte = 0x02
-    const val PACKET_SIZE = 24
+    const val PACKET_SIZE = 32
     const val PROBE_INTERVAL_MS = 5000L  // every 5 seconds
 
     data class ProbePacket(
@@ -26,6 +27,7 @@ object LatencyProber {
         val sequence: Int,
         val clientSendTs: Long,   // microseconds
         val serverRecvTs: Long,   // microseconds (0 in request)
+        val serverEchoTs: Long,   // microseconds (0 in request)
     )
 
     fun encode(pkt: ProbePacket): ByteArray {
@@ -36,6 +38,7 @@ object LatencyProber {
         buf.putShort(pkt.sequence.toShort())
         buf.putLong(pkt.clientSendTs)
         buf.putLong(pkt.serverRecvTs)
+        buf.putLong(pkt.serverEchoTs)
         return buf.array()
     }
 
@@ -48,8 +51,9 @@ object LatencyProber {
         buf.get()  // reserved
         val seq = buf.getShort().toInt() and 0xFFFF
         val clientTs = buf.getLong()
-        val serverTs = buf.getLong()
-        return ProbePacket(type, seq, clientTs, serverTs)
+        val serverRecvTs = buf.getLong()
+        val serverEchoTs = buf.getLong()
+        return ProbePacket(type, seq, clientTs, serverRecvTs, serverEchoTs)
     }
 
     /** Current time in microseconds (wall clock, matches server time.time()). */

@@ -385,8 +385,13 @@ class UdpTunnelVpnService : VpnService() {
                             val sentUs = probeSentTimes.remove(probe.sequence)
                             if (sentUs != null) {
                                 val rttUs = nowUs - sentUs
-                                val uplinkUs = (probe.serverRecvTs - sentUs).coerceAtLeast(0)
-                                val downlinkUs = (nowUs - probe.serverRecvTs).coerceAtLeast(0)
+                                // Server processing = server_echo - server_recv (same machine clock)
+                                val serverProcUs = (probe.serverEchoTs - probe.serverRecvTs).coerceAtLeast(0)
+                                // Network RTT = total RTT - server processing
+                                val networkRttUs = (rttUs - serverProcUs).coerceAtLeast(0)
+                                // Estimate: uplink ≈ downlink ≈ network_rtt / 2
+                                val uplinkUs = networkRttUs / 2
+                                val downlinkUs = networkRttUs / 2
 
                                 probesRecv++
                                 val rttMs = rttUs / 1000f
@@ -472,6 +477,7 @@ class UdpTunnelVpnService : VpnService() {
                                     sequence = seq,
                                     clientSendTs = nowUs,
                                     serverRecvTs = 0L,
+                                    serverEchoTs = 0L,
                                 )
                                 probeSentTimes[seq] = nowUs
                                 val data = LatencyProber.encode(pkt)
