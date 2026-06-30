@@ -34,7 +34,7 @@ import select
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
-__version__ = "3.7.0"
+__version__ = "3.8.0"
 
 TUNSETIFF = 0x400454CA
 IFF_TUN = 0x0001
@@ -54,6 +54,11 @@ PRIVATE_DNS_IP_BYTES = frozenset({
 # Private DNS IPs that clients may try to reach (e.g., emulator 10.0.2.3)
 # These are intercepted and forwarded to 8.8.8.8 instead of routing through TUN.
 PRIVATE_DNS_IPS = {"10.0.2.3", "10.0.2.2", "10.0.3.3"}
+# Latency probe constants
+TLTP_MAGIC = b"\x54\x4C\x54\x50"  # "TLTP" = Tunnely Latency Test Packet
+PROBE_REQUEST = 0x01
+PROBE_RESPONSE = 0x02
+PROBE_SIZE = 24
 
 STATE_FILE = "/var/lib/tunnely/sessions.json"
 LOG_FILE = "/var/log/tunnely-udp-vpn.log"
@@ -600,6 +605,18 @@ class UdpVpnServer:
                     log(f"Hello packet from {addr[0]}:{addr[1]} → {assigned_ip}")
                 else:
                     self.sessions.touch(self.sessions.addr_to_ip[addr])
+            # Handle latency probe (magic "TLTP" = 0x544C5450)
+            if len(data) == PROBE_SIZE and data[0:4] == TLTP_MAGIC:
+                probe_type = data[4]
+                if probe_type == PROBE_REQUEST:
+                    now_us = int(time.time() * 1_000_000)
+                    response = bytearray(data)
+                    response[4] = PROBE_RESPONSE
+                    struct.pack_into(">q", response, 16, now_us)
+                    try:
+                        self.sock.sendto(bytes(response), addr)
+                    except socket.error:
+                        pass
             return  # Not a valid IP packet
 
         src_ip = extract_src_ip(data)

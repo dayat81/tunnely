@@ -71,6 +71,17 @@ class UdpTunnelVpnService : VpnService() {
         private val _connectionHealth = MutableStateFlow(ConnectionHealth())
         val connectionHealth: StateFlow<ConnectionHealth> = _connectionHealth.asStateFlow()
 
+        data class LatencyStats(
+            val uplinkMs: Float = 0f,
+            val downlinkMs: Float = 0f,
+            val rttMs: Float = 0f,
+            val probesSent: Long = 0,
+            val probesRecv: Long = 0,
+        )
+
+        private val _latencyStats = MutableStateFlow(LatencyStats())
+        val latencyStats: StateFlow<LatencyStats> = _latencyStats.asStateFlow()
+
         private var serviceInstance: UdpTunnelVpnService? = null
 
         fun connect(context: Context, prefs: VpnPreferences) {
@@ -114,6 +125,16 @@ class UdpTunnelVpnService : VpnService() {
     @Volatile private var totalTx: Long = 0
     @Volatile private var lastPacketTime: Long = 0
     private var connectTime: Long = 0
+
+    // Latency probe state
+    @Volatile private var probeSeq: Int = 0
+    private val probeSentTimes = java.util.concurrent.ConcurrentHashMap<Int, Long>()
+    @Volatile private var probesSent: Long = 0
+    @Volatile private var probesRecv: Long = 0
+    @Volatile private var emaRtt: Float = 0f
+    @Volatile private var emaUplink: Float = 0f
+    @Volatile private var emaDownlink: Float = 0f
+    private val EMA_ALPHA = 0.3f
 
     override fun onCreate() {
         super.onCreate()
@@ -159,6 +180,16 @@ class UdpTunnelVpnService : VpnService() {
         totalRx = 0
         totalTx = 0
         connectTime = System.currentTimeMillis()
+
+        // Reset latency probe state
+        probeSeq = 0
+        probeSentTimes.clear()
+        probesSent = 0
+        probesRecv = 0
+        emaRtt = 0f
+        emaUplink = 0f
+        emaDownlink = 0f
+        _latencyStats.value = LatencyStats()
 
         try {
             // Step 1: Resolve server address
@@ -345,6 +376,42 @@ class UdpTunnelVpnService : VpnService() {
                     val n = pkt.length
                     if (n <= 0) continue
 
+                    // Detect latency probe response (before normal packet processing)
+                    if (n == LatencyProber.PACKET_SIZE) {
+                        val probe = LatencyProber.decode(buf.copyOf(n))
+                        if (probe != null && probe.type == LatencyProber.TYPE_RESPONSE) {
+                            val nowUs = LatencyProber.nowMicros()
+                            val sentUs = probeSentTimes.remove(probe.sequence)
+                            if (sentUs != null) {
+                                val rttUs = nowUs - sentUs
+                                val uplinkUs = (probe.serverRecvTs - sentUs).coerceAtLeast(0)
+                                val downlinkUs = (nowUs - probe.serverRecvTs).coerceAtLeast(0)
+
+                                probesRecv++
+                                val rttMs = rttUs / 1000f
+                                val uplinkMs = uplinkUs / 1000f
+                                val downlinkMs = downlinkUs / 1000f
+
+                                if (emaRtt == 0f) {
+                                    emaRtt = rttMs; emaUplink = uplinkMs; emaDownlink = downlinkMs
+                                } else {
+                                    emaRtt = EMA_ALPHA * rttMs + (1 - EMA_ALPHA) * emaRtt
+                                    emaUplink = EMA_ALPHA * uplinkMs + (1 - EMA_ALPHA) * emaUplink
+                                    emaDownlink = EMA_ALPHA * downlinkMs + (1 - EMA_ALPHA) * emaDownlink
+                                }
+
+                                _latencyStats.value = LatencyStats(
+                                    uplinkMs = emaUplink,
+                                    downlinkMs = emaDownlink,
+                                    rttMs = emaRtt,
+                                    probesSent = probesSent,
+                                    probesRecv = probesRecv,
+                                )
+                            }
+                            continue  // Don't write probe responses to TUN
+                        }
+                    }
+
                     // Track flow
                     PacketFlowTracker.processPacket(buf.copyOf(n), isUplink = false)
 
@@ -391,6 +458,24 @@ class UdpTunnelVpnService : VpnService() {
                             sock.send(DatagramPacket(keepaliveBuf, keepaliveBuf.size, addr, port))
                         } catch (e: Exception) {
                             RemoteLogger.w(TAG, "Keepalive send failed: ${e.message}")
+                        }
+
+                        // Send latency probe
+                        if (running) {
+                            try {
+                                val nowUs = LatencyProber.nowMicros()
+                                val seq = probeSeq++
+                                val pkt = LatencyProber.ProbePacket(
+                                    type = LatencyProber.TYPE_REQUEST,
+                                    sequence = seq,
+                                    clientSendTs = nowUs,
+                                    serverRecvTs = 0L,
+                                )
+                                probeSentTimes[seq] = nowUs
+                                val data = LatencyProber.encode(pkt)
+                                sock.send(DatagramPacket(data, data.size, addr, port))
+                                probesSent++
+                            } catch (_: Exception) {}
                         }
                     }
 
@@ -455,6 +540,8 @@ class UdpTunnelVpnService : VpnService() {
         _trafficStats.value = TrafficStats()
         _connectionHealth.value = ConnectionHealth()
         PacketFlowTracker.clear()
+        probeSentTimes.clear()
+        _latencyStats.value = LatencyStats()
         updateNotification("Disconnected")
 
         stopForeground(STOP_FOREGROUND_REMOVE)

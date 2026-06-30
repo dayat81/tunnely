@@ -40,6 +40,11 @@ class FlowsFragment : Fragment() {
     private lateinit var statsFlows: TextView
     private lateinit var statsFlowsTotal: TextView
 
+    // Latency views
+    private lateinit var latencyUplink: TextView
+    private lateinit var latencyDownlink: TextView
+    private lateinit var latencyRtt: TextView
+
     private var flowMonitor: FlowMonitor? = null
 
     // Rate calculation state — delta-based so it works when backgrounded
@@ -85,6 +90,11 @@ class FlowsFragment : Fragment() {
         statsTxTotal = view.findViewById(R.id.stats_tx_total)
         statsFlows = view.findViewById(R.id.stats_flows)
         statsFlowsTotal = view.findViewById(R.id.stats_flows_total)
+
+        // Latency views
+        latencyUplink = view.findViewById(R.id.latency_uplink)
+        latencyDownlink = view.findViewById(R.id.latency_downlink)
+        latencyRtt = view.findViewById(R.id.latency_rtt)
     }
 
     private fun setupRecyclerView() {
@@ -115,6 +125,17 @@ class FlowsFragment : Fragment() {
                         VpnState.CONNECTED -> {
                             // Show stats card
                             statsCard.visibility = View.VISIBLE
+
+                            // Observe latency stats
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                UdpTunnelVpnService.latencyStats.collectLatest { latency ->
+                                    withContext(Dispatchers.Main) {
+                                        latencyUplink.text = if (latency.uplinkMs > 0) "↑ ${formatLatency(latency.uplinkMs)}" else "↑ --"
+                                        latencyDownlink.text = if (latency.downlinkMs > 0) "↓ ${formatLatency(latency.downlinkMs)}" else "↓ --"
+                                        latencyRtt.text = if (latency.rttMs > 0) "RTT ${formatLatency(latency.rttMs)}" else "RTT --"
+                                    }
+                                }
+                            }
 
                             // Poll PacketFlowTracker every 3s (runs in VPN service I/O threads)
                             viewLifecycleOwner.lifecycleScope.launch {
@@ -192,6 +213,12 @@ class FlowsFragment : Fragment() {
             bytesPerSec < 1024 * 1024 -> "${bytesPerSec / 1024} KB/s"
             else -> "${"%.1f".format(bytesPerSec / (1024.0 * 1024.0))} MB/s"
         }
+    }
+
+    private fun formatLatency(ms: Float): String {
+        return if (ms < 1) "${"%.0f".format(ms * 1000)}µs"
+        else if (ms < 1000) "${"%.1f".format(ms)}ms"
+        else "${"%.2f".format(ms / 1000)}s"
     }
 
     /**
