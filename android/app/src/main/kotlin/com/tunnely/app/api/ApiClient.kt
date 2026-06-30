@@ -133,4 +133,50 @@ class ApiClient(
                 null
             }
         }
+
+    /**
+     * Get server-side SNI domain map from /api/vpn/stats.
+     * Returns map of "remote_ip" -> "domain" extracted from TLS ClientHello.
+     * Server tracks this in tcp_debug.recent_snis.
+     */
+    suspend fun getServerSniDomains(): Map<String, String> =
+        withContext(Dispatchers.IO) {
+            try {
+                val request = Request.Builder()
+                    .url("$baseUrl/api/vpn/stats")
+                    .get()
+                    .build()
+
+                val response = client.newCall(request).execute()
+                val body = response.body?.string() ?: return@withContext emptyMap()
+
+                if (!response.isSuccessful) return@withContext emptyMap()
+
+                val json = JSONObject(body)
+                val tcpDebug = json.optJSONObject("tcp_debug") ?: return@withContext emptyMap()
+                val recentSnis = tcpDebug.optJSONArray("recent_snis") ?: return@withContext emptyMap()
+
+                val domainMap = mutableMapOf<String, String>()
+                for (i in 0 until recentSnis.length()) {
+                    val entry = recentSnis.getString(i)
+                    // Format: "client_ip→remote_ip:port = domain"
+                    // e.g. "10.20.0.243→142.251.10.95:443 = pubsub.googleapis.com"
+                    val arrowIdx = entry.indexOf('→')
+                    val equalsIdx = entry.indexOf('=')
+                    if (arrowIdx >= 0 && equalsIdx > arrowIdx) {
+                        val remotePart = entry.substring(arrowIdx + 1, equalsIdx).trim()
+                        val domain = entry.substring(equalsIdx + 1).trim().lowercase()
+                        // remotePart = "142.251.10.95:443" — extract just IP
+                        val colonIdx = remotePart.indexOf(':')
+                        val remoteIp = if (colonIdx > 0) remotePart.substring(0, colonIdx) else remotePart
+                        if (domain.isNotEmpty()) {
+                            domainMap[remoteIp] = domain
+                        }
+                    }
+                }
+                domainMap
+            } catch (_: Exception) {
+                emptyMap()
+            }
+        }
 }

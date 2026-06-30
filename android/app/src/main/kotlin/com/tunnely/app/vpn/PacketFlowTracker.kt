@@ -39,6 +39,9 @@ object PacketFlowTracker {
 
     private val flows = ConcurrentHashMap<String, FlowStats>()
 
+    // Server-side SNI domain map — populated from /api/vpn/stats
+    @Volatile var serverSniMap: Map<String, String> = emptyMap()
+
     /** Debug stats for troubleshooting SNI extraction */
     fun getDebugStats(): String {
         val flowDomains = flows.values
@@ -190,11 +193,10 @@ object PacketFlowTracker {
         return flows.values
             .sortedByDescending { it.uplinkBytes + it.downlinkBytes }
             .map { f ->
-                // ALWAYS check DomainCache — don't rely on FlowStats.domain alone.
-                // FlowStats.domain is set via @Volatile write inside compute(),
-                // but on ARM the write may not propagate to the UI thread.
-                // DomainCache uses @Synchronized which provides full happens-before.
-                val domain = f.domain ?: DomainCache.getDomain(f.remoteIp)
+                // Priority: FlowStats.domain → DomainCache → ServerSniMap
+                val domain = f.domain
+                    ?: DomainCache.getDomain(f.remoteIp)
+                    ?: serverSniMap[f.remoteIp]
                 FlowEntry(
                     server = f.remoteIp,
                     domain = domain,

@@ -46,6 +46,7 @@ class FlowsFragment : Fragment() {
     private lateinit var latencyRtt: TextView
 
     private var flowMonitor: FlowMonitor? = null
+    private lateinit var apiClient: ApiClient
 
     // Rate calculation state — delta-based so it works when backgrounded
     private var prevRxBytes: Long = -1
@@ -66,6 +67,10 @@ class FlowsFragment : Fragment() {
         initViews(view)
         setupRecyclerView()
         setupSortButtons()
+
+        // Initialize API client for server-side SNI fetching
+        val app = requireActivity().application as TunnelyApp
+        apiClient = ApiClient(app.prefs.serverAddress, app.prefs.serverPort)
 
         // Show empty state initially
         updateEmptyState(true, false)
@@ -140,6 +145,16 @@ class FlowsFragment : Fragment() {
                             // Poll PacketFlowTracker every 3s (runs in VPN service I/O threads)
                             viewLifecycleOwner.lifecycleScope.launch {
                                 while (UdpTunnelVpnService.vpnState.value == VpnState.CONNECTED) {
+                                    // Fetch server-side SNI domains (server extracts from TLS ClientHello)
+                                    try {
+                                        val serverSni = apiClient.getServerSniDomains()
+                                        if (serverSni.isNotEmpty()) {
+                                            PacketFlowTracker.serverSniMap = serverSni
+                                        }
+                                    } catch (_: Exception) {
+                                        // Server may not be reachable
+                                    }
+
                                     val flows = PacketFlowTracker.getFlows()
                                     val stats = PacketFlowTracker.getAggregateStats()
                                     val nowMs = System.currentTimeMillis()
