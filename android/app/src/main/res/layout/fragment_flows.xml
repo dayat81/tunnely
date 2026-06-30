@@ -33,6 +33,11 @@
         app:strokeWidth="1dp"
         android:visibility="gone">
 
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
         <!-- Latency Row -->
         <LinearLayout
             android:layout_width="match_parent"
@@ -40,8 +45,8 @@
             android:orientation="horizontal"
             android:paddingHorizontal="16dp"
             android:paddingTop="12dp"
+            android:paddingBottom="8dp"
             android:gravity="center_vertical">
-
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -87,14 +92,15 @@
             android:layout_width="match_parent"
             android:layout_height="1dp"
             android:layout_marginHorizontal="16dp"
-            android:layout_marginTop="8dp"
             android:background="@color/card_border" />
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
-            android:padding="16dp"
+            android:paddingHorizontal="16dp"
+            android:paddingTop="12dp"
+            android:paddingBottom="16dp"
             android:gravity="center_vertical">
 
             <!-- Download -->
@@ -211,6 +217,7 @@
                     android:textSize="11sp"
                     android:layout_marginTop="2dp" />
             </LinearLayout>
+        </LinearLayout>
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
