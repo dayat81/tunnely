@@ -309,13 +309,16 @@ class SettingsFragment : Fragment() {
             .setView(container)
             .setPositiveButton("Save") { _, _ ->
                 val selected = adapter.getSelectedPackages()
+                // Use commit() for synchronous write — apply() is async and VPN may connect before disk write
                 prefs.splitApps = selected
+                RemoteLogger.i("SettingsFragment", "Split apps saved via dialog: ${selected.size} apps = $selected")
                 updatePickAppsButtonText(prefs)
                 Toast.makeText(requireContext(), "${selected.size} apps selected for VPN", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Cancel", null)
             .setNeutralButton("Clear All") { _, _ ->
                 prefs.splitApps = emptySet()
+                RemoteLogger.i("SettingsFragment", "Split apps cleared via dialog")
                 updatePickAppsButtonText(prefs)
             }
             .create()
