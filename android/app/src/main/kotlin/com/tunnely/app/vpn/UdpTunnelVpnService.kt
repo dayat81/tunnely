@@ -240,25 +240,17 @@ class UdpTunnelVpnService : VpnService() {
                 RemoteLogger.i(TAG, "  Split apps: ${prefs.splitApps}")
                 
                 if (mode == "include") {
-                    if (prefs.splitApps.isEmpty()) {
-                        // Include mode with 0 apps = block all traffic
-                        // Add a non-existent package so nothing matches
+                    // INCLUDE mode: only selected apps go through VPN
+                    // Note: 0 apps case handled later (throws exception to prevent VPN start)
+                    for (pkg in prefs.splitApps) {
                         try {
-                            builder.addAllowedApplication("com.tunnely.blocked.placeholder")
-                            RemoteLogger.i(TAG, "  Split tunneling [include]: 0 apps → blocking all traffic")
-                        } catch (_: Exception) {}
-                    } else {
-                        // INCLUDE mode: only selected apps go through VPN
-                        for (pkg in prefs.splitApps) {
-                            try {
-                                builder.addAllowedApplication(pkg)
-                                RemoteLogger.i(TAG, "  ✅ Allowed: $pkg")
-                            } catch (e: Exception) {
-                                RemoteLogger.w(TAG, "  ❌ Failed to include $pkg: ${e.message}")
-                            }
+                            builder.addAllowedApplication(pkg)
+                            RemoteLogger.i(TAG, "  ✅ Allowed: $pkg")
+                        } catch (e: Exception) {
+                            RemoteLogger.w(TAG, "  ❌ Failed to include $pkg: ${e.message}")
                         }
-                        RemoteLogger.i(TAG, "  Split tunneling [include]: ${prefs.splitApps.size} apps through VPN")
                     }
+                    RemoteLogger.i(TAG, "  Split tunneling [include]: ${prefs.splitApps.size} apps through VPN")
                 } else {
                     // EXCLUDE mode (default): selected apps bypass VPN, all else through VPN
                     // Uses addDisallowedApplication — more reliable for TCP
@@ -274,6 +266,12 @@ class UdpTunnelVpnService : VpnService() {
                 }
             } else {
                 RemoteLogger.i(TAG, "  Split tunneling disabled (splitTunneling=${prefs.splitTunneling})")
+            }
+
+            // Prevent VPN establishment if Include mode has 0 apps
+            // Android falls back to "allow all" when addAllowedApplication list is empty
+            if (prefs.splitTunneling && prefs.splitMode == "include" && prefs.splitApps.isEmpty()) {
+                throw Exception("Include mode requires at least 1 app. No apps selected — VPN not started.")
             }
 
             builder.setConfigureIntent(
