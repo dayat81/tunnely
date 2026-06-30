@@ -135,6 +135,7 @@ class UdpTunnelVpnService : VpnService() {
     @Volatile private var emaUplink: Float = 0f
     @Volatile private var emaDownlink: Float = 0f
     private val EMA_ALPHA = 0.3f
+    private var lastProbeSentMs: Long = 0  // separate timing from keepalive
 
     override fun onCreate() {
         super.onCreate()
@@ -460,8 +461,9 @@ class UdpTunnelVpnService : VpnService() {
                             RemoteLogger.w(TAG, "Keepalive send failed: ${e.message}")
                         }
 
-                        // Send latency probe
-                        if (running) {
+                        // Send latency probe (every 5s, separate from 15s keepalive)
+                        val nowMs = System.currentTimeMillis()
+                        if (running && nowMs - lastProbeSentMs >= LatencyProber.PROBE_INTERVAL_MS) {
                             try {
                                 val nowUs = LatencyProber.nowMicros()
                                 val seq = probeSeq++
@@ -475,6 +477,14 @@ class UdpTunnelVpnService : VpnService() {
                                 val data = LatencyProber.encode(pkt)
                                 sock.send(DatagramPacket(data, data.size, addr, port))
                                 probesSent++
+                                lastProbeSentMs = nowMs
+
+                                // Purge stale probe entries (>30s) to prevent memory leak
+                                val cutoffUs = nowUs - 30_000_000L
+                                val iter = probeSentTimes.entries.iterator()
+                                while (iter.hasNext()) {
+                                    if (iter.next().value < cutoffUs) iter.remove()
+                                }
                             } catch (_: Exception) {}
                         }
                     }
