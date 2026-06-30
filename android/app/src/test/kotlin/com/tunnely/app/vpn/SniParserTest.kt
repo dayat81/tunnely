@@ -179,7 +179,65 @@ class SniParserTest {
         return packet.array()
     }
 
-    // ── Tests ──────────────────────────────────────────────────────
+    private fun buildTlsServerHello(): ByteArray {
+        val packet = ByteBuffer.allocate(100)
+        
+        // IP Header
+        packet.put(0x45)
+        packet.put(0x00)
+        packet.putShort(100.toShort())
+        packet.putInt(0)
+        packet.put(0x40.toByte())
+        packet.put(0x06) // TCP
+        packet.putShort(0)
+        packet.put(byteArrayOf(140.toByte(), 82, 121, 6))
+        packet.put(byteArrayOf(10, 0, 0, 2))
+        
+        // TCP Header
+        packet.putShort(443.toShort())
+        packet.putShort(12345.toShort())
+        packet.putInt(0)
+        packet.putInt(0)
+        packet.put(0x50.toByte())
+        packet.put(0x10) // ACK
+        packet.putShort(65535.toShort())
+        packet.putShort(0)
+        packet.putShort(0)
+        
+        // TLS ServerHello (not ClientHello)
+        packet.put(0x16) // Handshake
+        packet.putShort(0x0303.toShort()) // TLS 1.2
+        packet.putShort(50.toShort()) // Length
+        packet.put(0x02) // ServerHello (not ClientHello)
+        
+        return packet.array()
+    }
+
+    private fun buildIcmpPacket(): ByteArray {
+        val packet = ByteBuffer.allocate(40)
+        
+        // IP Header
+        packet.put(0x45)
+        packet.put(0x00)
+        packet.putShort(40.toShort())
+        packet.putInt(0)
+        packet.put(0x40.toByte())
+        packet.put(0x01) // ICMP
+        packet.putShort(0)
+        packet.put(byteArrayOf(10, 0, 0, 2))
+        packet.put(byteArrayOf(8, 8, 8, 8))
+        
+        // ICMP Header
+        packet.put(0x08) // Echo request
+        packet.put(0x00)
+        packet.putShort(0) // Checksum
+        packet.putShort(0) // ID
+        packet.putShort(0) // Sequence
+        
+        return packet.array()
+    }
+
+    // ── SNI Parser Tests ───────────────────────────────────────────
 
     @Test
     fun `extract SNI from TLS ClientHello`() {
@@ -217,8 +275,22 @@ class SniParserTest {
     }
 
     @Test
+    fun `ICMP packet returns null`() {
+        val packet = buildIcmpPacket()
+        val domain = SniParser.extractSni(packet)
+        assertNull(domain)
+    }
+
+    @Test
     fun `too short packet returns null`() {
         val packet = ByteArray(5)
+        val domain = SniParser.extractSni(packet)
+        assertNull(domain)
+    }
+
+    @Test
+    fun `empty packet returns null`() {
+        val packet = ByteArray(0)
         val domain = SniParser.extractSni(packet)
         assertNull(domain)
     }
@@ -229,6 +301,13 @@ class SniParserTest {
         packet[0] = 0x60.toByte() // IPv6
         val domain = SniParser.extractSni(packet)
         assertNull(domain)
+    }
+
+    @Test
+    fun `TLS ServerHello returns null`() {
+        val packet = buildTlsServerHello()
+        val domain = SniParser.extractSni(packet)
+        assertNull(domain) // ServerHello has no SNI
     }
 
     @Test
@@ -243,6 +322,63 @@ class SniParserTest {
         val packet = buildClientHelloWithSni("api2.example.com")
         val domain = SniParser.extractSni(packet)
         assertEquals("api2.example.com", domain)
+    }
+
+    @Test
+    fun `single label domain`() {
+        val packet = buildClientHelloWithSni("localhost")
+        val domain = SniParser.extractSni(packet)
+        assertEquals("localhost", domain)
+    }
+
+    @Test
+    fun `long domain name`() {
+        val longDomain = "a".repeat(63) + ".example.com" // Max label 63 chars
+        val packet = buildClientHelloWithSni(longDomain)
+        val domain = SniParser.extractSni(packet)
+        assertEquals(longDomain, domain)
+    }
+
+    @Test
+    fun `domain with max length`() {
+        // Max domain length is 253 chars
+        val maxDomain = "a".repeat(60) + "." + "b".repeat(60) + "." + "c".repeat(60) + ".com"
+        val packet = buildClientHelloWithSni(maxDomain)
+        val domain = SniParser.extractSni(packet)
+        assertEquals(maxDomain, domain)
+    }
+
+    @Test
+    fun `multiple packets same domain`() {
+        // Same domain should extract consistently
+        val packet1 = buildClientHelloWithSni("api.example.com")
+        val packet2 = buildClientHelloWithSni("api.example.com")
+        assertEquals(SniParser.extractSni(packet1), SniParser.extractSni(packet2))
+    }
+
+    @Test
+    fun `multiple packets different domains`() {
+        val packet1 = buildClientHelloWithSni("api.example.com")
+        val packet2 = buildClientHelloWithSni("cdn.example.com")
+        assertNotEquals(SniParser.extractSni(packet1), SniParser.extractSni(packet2))
+    }
+
+    @Test
+    fun `IHL 5 parses correctly`() {
+        // IHL=5 means 20 byte IP header (standard)
+        val packet = buildClientHelloWithSni("example.com")
+        val ihl = (packet[0].toInt() and 0x0F) * 4
+        assertEquals(20, ihl)
+        assertEquals("example.com", SniParser.extractSni(packet))
+    }
+
+    @Test
+    fun `TCP data offset 5 parses correctly`() {
+        // Data offset=5 means 20 byte TCP header (standard)
+        val packet = buildClientHelloWithSni("example.com")
+        val tcpHeaderStart = 20 // After IP header
+        val dataOffset = ((packet[tcpHeaderStart + 12].toInt() and 0xF0) shr 4) * 4
+        assertEquals(20, dataOffset)
     }
 
     // ── DomainCache Tests ──────────────────────────────────────────
@@ -307,6 +443,63 @@ class SniParserTest {
         assertEquals("new.example.com", DomainCache.getDomain("10.0.1.1"))
     }
 
+    @Test
+    fun `cache LRU evicts least recently used`() {
+        DomainCache.clear()
+        // Fill to 999
+        for (i in 1..999) {
+            DomainCache.putDomain("10.0.0.$i", "host$i.example.com")
+        }
+        
+        // Access first entry to make it recently used
+        DomainCache.getDomain("10.0.0.1")
+        
+        // Add 2 more entries (total 1001, should evict 10.0.0.2)
+        DomainCache.putDomain("10.0.1.1", "new1.example.com")
+        DomainCache.putDomain("10.0.1.2", "new2.example.com")
+        
+        assertEquals(1000, DomainCache.size())
+        // 10.0.0.1 should still exist (recently accessed)
+        assertNotNull(DomainCache.getDomain("10.0.0.1"))
+        // 10.0.0.2 should be evicted
+        assertNull(DomainCache.getDomain("10.0.0.2"))
+    }
+
+    @Test
+    fun `cache stores multiple IPs for different domains`() {
+        DomainCache.clear()
+        DomainCache.putDomain("1.1.1.1", "one.com")
+        DomainCache.putDomain("2.2.2.2", "two.com")
+        DomainCache.putDomain("3.3.3.3", "three.com")
+        
+        assertEquals("one.com", DomainCache.getDomain("1.1.1.1"))
+        assertEquals("two.com", DomainCache.getDomain("2.2.2.2"))
+        assertEquals("three.com", DomainCache.getDomain("3.3.3.3"))
+    }
+
+    @Test
+    fun `cache handles empty domain string`() {
+        DomainCache.clear()
+        DomainCache.putDomain("1.2.3.4", "")
+        assertEquals("", DomainCache.getDomain("1.2.3.4"))
+    }
+
+    @Test
+    fun `cache handles localhost`() {
+        DomainCache.clear()
+        DomainCache.putDomain("127.0.0.1", "localhost")
+        assertEquals("localhost", DomainCache.getDomain("127.0.0.1"))
+    }
+
+    @Test
+    fun `cache handles private IPs`() {
+        DomainCache.clear()
+        DomainCache.putDomain("192.168.1.1", "router.local")
+        DomainCache.putDomain("10.0.0.1", "gateway.local")
+        assertEquals("router.local", DomainCache.getDomain("192.168.1.1"))
+        assertEquals("gateway.local", DomainCache.getDomain("10.0.0.1"))
+    }
+
     // ── FlowEntry Domain Tests ─────────────────────────────────────
 
     @Test
@@ -335,5 +528,130 @@ class SniParserTest {
         )
         assertEquals("140.82.121.6:443", entry.displayServer)
         assertEquals("140.82.121.6:443", entry.displayServerWithPort)
+    }
+
+    @Test
+    fun `FlowEntry domain with different ports`() {
+        val entry443 = FlowEntry(server = "1.2.3.4", domain = "example.com", port = 443, protocol = "TCP", uplinkBytes = 0, downlinkBytes = 0)
+        val entry8443 = FlowEntry(server = "1.2.3.4", domain = "example.com", port = 8443, protocol = "TCP", uplinkBytes = 0, downlinkBytes = 0)
+        
+        assertEquals("example.com:443", entry443.displayServerWithPort)
+        assertEquals("example.com:8443", entry8443.displayServerWithPort)
+    }
+
+    @Test
+    fun `FlowEntry with IP-only port 443`() {
+        val entry = FlowEntry(
+            server = "1.2.3.4",
+            domain = null,
+            port = 443,
+            protocol = "TCP",
+            uplinkBytes = 0,
+            downlinkBytes = 0
+        )
+        assertEquals("1.2.3.4:443", entry.displayServer)
+    }
+
+    @Test
+    fun `FlowEntry display server with domain hides port`() {
+        val entry = FlowEntry(
+            server = "1.2.3.4",
+            domain = "api.example.com",
+            port = 443,
+            protocol = "TCP",
+            uplinkBytes = 0,
+            downlinkBytes = 0
+        )
+        // displayServer shows domain only (no port)
+        assertEquals("api.example.com", entry.displayServer)
+        // displayServerWithPort shows domain + port
+        assertEquals("api.example.com:443", entry.displayServerWithPort)
+    }
+
+    @Test
+    fun `FlowEntry display server with IP shows IP and port`() {
+        val entry = FlowEntry(
+            server = "1.2.3.4",
+            domain = null,
+            port = 8080,
+            protocol = "TCP",
+            uplinkBytes = 0,
+            downlinkBytes = 0
+        )
+        // Both show IP:port when no domain
+        assertEquals("1.2.3.4:8080", entry.displayServer)
+        assertEquals("1.2.3.4:8080", entry.displayServerWithPort)
+    }
+
+    // ── Integration: PacketFlowTracker + SNI ───────────────────────
+
+    @Test
+    fun `PacketFlowTracker extracts domain from uplink TLS`() {
+        DomainCache.clear()
+        val tracker = PacketFlowTracker
+        
+        // Clear any existing flows
+        tracker.clear()
+        
+        // Create TLS ClientHello packet
+        val packet = buildClientHelloWithSni("api.github.com")
+        
+        // Process as uplink
+        tracker.processPacket(packet, isUplink = true)
+        
+        // Check if domain was cached
+        assertEquals("api.github.com", DomainCache.getDomain("140.82.121.6"))
+    }
+
+    @Test
+    fun `PacketFlowTracker does not extract domain from downlink`() {
+        DomainCache.clear()
+        val tracker = PacketFlowTracker
+        tracker.clear()
+        
+        // Create packet (downlink - server to client)
+        val packet = buildClientHelloWithSni("api.github.com")
+        
+        // Process as downlink (should NOT extract SNI)
+        tracker.processPacket(packet, isUplink = false)
+        
+        // Domain should NOT be cached (downlink packets don't have ClientHello)
+        assertNull(DomainCache.getDomain("140.82.121.6"))
+    }
+
+    @Test
+    fun `PacketFlowTracker uses cached domain for subsequent packets`() {
+        DomainCache.clear()
+        val tracker = PacketFlowTracker
+        tracker.clear()
+        
+        // First packet: TLS ClientHello (uplink)
+        val tlsPacket = buildClientHelloWithSni("api.github.com")
+        tracker.processPacket(tlsPacket, isUplink = true)
+        
+        // Second packet: non-TLS (downlink) to same IP
+        val nonTlsPacket = buildNonTlsPacket()
+        tracker.processPacket(nonTlsPacket, isUplink = false)
+        
+        // Domain should be cached from first packet
+        assertEquals("api.github.com", DomainCache.getDomain("140.82.121.6"))
+    }
+
+    @Test
+    fun `PacketFlowTracker clear removes all state`() {
+        DomainCache.clear()
+        val tracker = PacketFlowTracker
+        
+        // Add some data
+        val packet = buildClientHelloWithSni("api.github.com")
+        tracker.processPacket(packet, isUplink = true)
+        
+        // Clear tracker
+        tracker.clear()
+        
+        // Domain cache should still have the domain (separate from tracker)
+        // But tracker flows should be empty
+        val flows = tracker.getFlows()
+        assertEquals(0, flows.size)
     }
 }
