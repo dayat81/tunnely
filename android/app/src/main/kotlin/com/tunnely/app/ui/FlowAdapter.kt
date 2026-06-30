@@ -24,6 +24,7 @@ class FlowAdapter : ListAdapter<FlowEntry, FlowAdapter.FlowViewHolder>(FlowDiffC
 
     inner class FlowViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         private val serverText: TextView = itemView.findViewById(R.id.flow_server)
+        private val ipText: TextView = itemView.findViewById(R.id.flow_ip)
         private val portText: TextView = itemView.findViewById(R.id.flow_port)
         private val protocolBadge: TextView = itemView.findViewById(R.id.flow_protocol)
         private val uplinkText: TextView = itemView.findViewById(R.id.flow_uplink)
@@ -33,9 +34,12 @@ class FlowAdapter : ListAdapter<FlowEntry, FlowAdapter.FlowViewHolder>(FlowDiffC
             // Show domain if available, otherwise IP
             if (entry.domain != null) {
                 serverText.text = entry.domain
-                portText.text = ":${entry.port} 🔒"
+                ipText.text = "${entry.server}:${entry.port}"
+                ipText.visibility = View.VISIBLE
+                portText.text = "🔒"
             } else {
                 serverText.text = entry.server
+                ipText.visibility = View.GONE
                 portText.text = ":${entry.port}"
             }
 

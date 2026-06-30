@@ -87,8 +87,20 @@ class FlowMonitor(
                     }
 
                     // Merge: prefer server flows, supplement with local
-                    val merged = if (serverFlows.isNotEmpty()) {
-                        // Add local flows that aren't already in server data
+                    // Also get client-side flows from PacketFlowTracker (has SNI domains!)
+                    val trackerFlows = try {
+                        PacketFlowTracker.getFlows()
+                    } catch (_: Exception) {
+                        emptyList()
+                    }
+
+                    // Merge: prefer tracker flows (has domain info), then server, then local
+                    val merged = if (trackerFlows.isNotEmpty()) {
+                        val trackerKeys = trackerFlows.map { "${it.server}:${it.port}" }.toSet()
+                        val extraServer = serverFlows.filter { "${it.server}:${it.port}" !in trackerKeys }
+                        val extraLocal = localFlows.filter { "${it.server}:${it.port}" !in trackerKeys }
+                        trackerFlows + extraServer + extraLocal
+                    } else if (serverFlows.isNotEmpty()) {
                         val serverKeys = serverFlows.map { "${it.server}:${it.port}" }.toSet()
                         val extraLocal = localFlows.filter { "${it.server}:${it.port}" !in serverKeys }
                         serverFlows + extraLocal
@@ -139,7 +151,7 @@ class FlowMonitor(
         return when (mode) {
             FlowSortMode.UPLINK -> flows.sortedByDescending { it.uplinkBytes }
             FlowSortMode.DOWNLINK -> flows.sortedByDescending { it.downlinkBytes }
-            FlowSortMode.SERVER -> flows.sortedBy { it.server }
+            FlowSortMode.SERVER -> flows.sortedBy { it.domain ?: it.server }
         }
     }
 
