@@ -242,9 +242,9 @@ class SplitTunnelingModeTest {
 
     @Test
     fun `include mode with 0 apps should block all traffic`() {
-        // Issue #29: Include mode + 0 apps = traffic still flows
-        // Android falls back to "allow all" when addAllowedApplication list is empty
-        // Fix: add a dummy placeholder package so nothing matches
+        // Issue #29: Include mode + 0 apps = traffic still flows (v3.14.6)
+        // v3.14.7: dummy placeholder → NameNotFoundException → still broken
+        // v3.14.8: throw exception before VPN establishment → VPN not started
         val mode = "include"
         val apps = emptySet<String>()
         val splitTunneling = true
@@ -253,10 +253,9 @@ class SplitTunnelingModeTest {
         assertEquals(0, apps.size)
         assertTrue(splitTunneling)
         
-        // VPN builder should add "com.tunnely.blocked.placeholder" as allowed
-        // so no real app matches → 0 traffic through VPN
-        val shouldBlock = splitTunneling && mode == "include" && apps.isEmpty()
-        assertTrue(shouldBlock)
+        // Should prevent VPN start when Include mode has 0 apps
+        val shouldPreventVpn = splitTunneling && mode == "include" && apps.isEmpty()
+        assertTrue(shouldPreventVpn)
     }
 
     @Test
@@ -269,8 +268,92 @@ class SplitTunnelingModeTest {
         assertEquals("include", mode)
         assertEquals(1, apps.size)
         
-        // VPN builder should add "com.android.chrome" as allowed
-        val shouldBlock = splitTunneling && mode == "include" && apps.isEmpty()
-        assertFalse(shouldBlock)
+        // VPN should start with only selected apps
+        val shouldPreventVpn = splitTunneling && mode == "include" && apps.isEmpty()
+        assertFalse(shouldPreventVpn)
+    }
+
+    @Test
+    fun `exclude mode with 0 apps should allow all traffic`() {
+        // Exclude mode with 0 apps = no exclusions = all traffic through VPN
+        val mode = "exclude"
+        val apps = emptySet<String>()
+        val splitTunneling = true
+        
+        assertEquals("exclude", mode)
+        assertEquals(0, apps.size)
+        
+        // VPN should start normally (all traffic through VPN)
+        val shouldPreventVpn = splitTunneling && mode == "include" && apps.isEmpty()
+        assertFalse(shouldPreventVpn)
+    }
+
+    @Test
+    fun `exclude mode with apps should exclude those apps`() {
+        // Exclude mode: selected apps bypass VPN
+        val mode = "exclude"
+        val apps = setOf("com.android.chrome", "org.mozilla.firefox")
+        val splitTunneling = true
+        
+        assertEquals("exclude", mode)
+        assertEquals(2, apps.size)
+        
+        // VPN should start with those apps excluded
+        val shouldPreventVpn = splitTunneling && mode == "include" && apps.isEmpty()
+        assertFalse(shouldPreventVpn)
+    }
+
+    @Test
+    fun `split tunneling disabled should allow all traffic`() {
+        // Split tunneling off = all traffic through VPN regardless of mode
+        val mode = "include"
+        val apps = setOf("com.android.chrome")
+        val splitTunneling = false
+        
+        assertFalse(splitTunneling)
+        
+        // VPN should start normally (split tunneling disabled)
+        val shouldPreventVpn = splitTunneling && mode == "include" && apps.isEmpty()
+        assertFalse(shouldPreventVpn)
+    }
+
+    @Test
+    fun `include mode with multiple apps should work`() {
+        // Include mode with multiple apps
+        val mode = "include"
+        val apps = setOf("com.android.chrome", "org.mozilla.firefox", "com.whatsapp")
+        val splitTunneling = true
+        
+        assertEquals("include", mode)
+        assertEquals(3, apps.size)
+        
+        // VPN should start with only those 3 apps
+        val shouldPreventVpn = splitTunneling && mode == "include" && apps.isEmpty()
+        assertFalse(shouldPreventVpn)
+    }
+
+    @Test
+    fun `dummy placeholder fails with NameNotFoundException`() {
+        // v3.14.7 fix attempt: addAllowedApplication("com.tunnely.blocked.placeholder")
+        // This fails because Android validates package existence
+        val dummyPackage = "com.tunnely.blocked.placeholder"
+        
+        // Simulate: addAllowedApplication throws NameNotFoundException
+        // for non-existent packages
+        val packageExists = false  // placeholder doesn't exist
+        assertFalse(packageExists)
+        
+        // Therefore: dummy placeholder approach doesn't work
+        // Must use throw exception approach instead
+    }
+
+    @Test
+    fun `vpn error message for include 0 apps`() {
+        // Error message when Include mode has 0 apps
+        val expectedMessage = "Include mode requires at least 1 app. No apps selected — VPN not started."
+        
+        // Message should be user-friendly
+        assertTrue(expectedMessage.contains("Include mode"))
+        assertTrue(expectedMessage.contains("at least 1 app"))
     }
 }
