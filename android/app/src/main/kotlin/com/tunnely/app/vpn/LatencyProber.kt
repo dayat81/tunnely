@@ -52,6 +52,6 @@ object LatencyProber {
         return ProbePacket(type, seq, clientTs, serverTs)
     }
 
-    /** Current time in microseconds. Uses nanoTime for monotonic precision. */
-    fun nowMicros(): Long = System.nanoTime() / 1000
+    /** Current time in microseconds (wall clock, matches server time.time()). */
+    fun nowMicros(): Long = System.currentTimeMillis() * 1000
 }
