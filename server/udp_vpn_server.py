@@ -41,7 +41,7 @@ except ImportError:
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
-__version__ = "3.8.0"
+__version__ = "3.20.3"
 
 TUNSETIFF = 0x400454CA
 IFF_TUN = 0x0001
