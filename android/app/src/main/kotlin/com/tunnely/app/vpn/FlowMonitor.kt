@@ -9,12 +9,14 @@ import org.json.JSONObject
 
 data class FlowEntry(
     val server: String,
+    val domain: String? = null,
     val port: Int,
     val protocol: String,
     val uplinkBytes: Long,
     val downlinkBytes: Long
 ) {
-    val displayServer: String get() = "$server:$port"
+    val displayServer: String get() = if (domain != null) "$domain" else "$server:$port"
+    val displayServerWithPort: String get() = if (domain != null) "$domain:$port" else "$server:$port"
     val displayUplink: String get() = formatBytes(uplinkBytes)
     val displayDownlink: String get() = formatBytes(downlinkBytes)
 

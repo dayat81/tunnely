@@ -6,6 +6,7 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * Lightweight packet-level flow tracker.
  * Parses IP/TCP/UDP headers to extract per-connection stats.
+ * Extracts SNI domain names from TLS ClientHello packets.
  * Thread-safe — called from both I/O threads in UdpTunnelVpnService.
  *
  * Flow key = (remote_ip, remote_port, protocol) where "remote" is the
@@ -20,6 +21,7 @@ object PacketFlowTracker {
         val remoteIp: String,
         val remotePort: Int,
         val protocol: String,
+        var domain: String? = null,
         var uplinkBytes: Long = 0,   // TUN → UDP (client → internet)
         var downlinkBytes: Long = 0, // UDP → TUN (internet → client)
         var lastSeen: Long = System.currentTimeMillis()
@@ -29,6 +31,7 @@ object PacketFlowTracker {
 
     /**
      * Process a raw IP packet and update flow stats.
+     * Also extracts SNI domain from TLS ClientHello packets.
      *
      * @param packet Raw IP packet bytes
      * @param isUplink true = TUN→UDP (outgoing), false = UDP→TUN (incoming)
@@ -73,6 +76,20 @@ object PacketFlowTracker {
             remotePort = srcPort
         }
 
+        // Extract SNI domain from TLS ClientHello (uplink only)
+        var domain: String? = null
+        if (isUplink && protoName == "TCP" && dstPort == 443) {
+            domain = SniParser.extractSni(packet)
+            if (domain != null) {
+                DomainCache.putDomain(remoteIp, domain)
+            }
+        }
+
+        // Try cache for non-SNI packets (downlink or already cached)
+        if (domain == null) {
+            domain = DomainCache.getDomain(remoteIp)
+        }
+
         val key = "$remoteIp:$remotePort/$protoName"
         val now = System.currentTimeMillis()
         val packetLen = packet.size.toLong()
@@ -82,6 +99,10 @@ object PacketFlowTracker {
                 if (isUplink) existing.uplinkBytes += packetLen
                 else existing.downlinkBytes += packetLen
                 existing.lastSeen = now
+                // Update domain if we found one
+                if (domain != null && existing.domain == null) {
+                    existing.domain = domain
+                }
                 existing
             } else {
                 // Evict oldest if at capacity
@@ -93,6 +114,7 @@ object PacketFlowTracker {
                     remoteIp = remoteIp,
                     remotePort = remotePort,
                     protocol = protoName,
+                    domain = domain,
                     uplinkBytes = if (isUplink) packetLen else 0,
                     downlinkBytes = if (!isUplink) packetLen else 0,
                     lastSeen = now
@@ -116,6 +138,7 @@ object PacketFlowTracker {
             .map { f ->
                 FlowEntry(
                     server = f.remoteIp,
+                    domain = f.domain,
                     port = f.remotePort,
                     protocol = f.protocol,
                     uplinkBytes = f.uplinkBytes,

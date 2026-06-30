@@ -30,9 +30,14 @@ class FlowAdapter : ListAdapter<FlowEntry, FlowAdapter.FlowViewHolder>(FlowDiffC
         private val downlinkText: TextView = itemView.findViewById(R.id.flow_downlink)
 
         fun bind(entry: FlowEntry) {
-            // Split IP and port
-            serverText.text = entry.server
-            portText.text = ":${entry.port}"
+            // Show domain if available, otherwise IP
+            if (entry.domain != null) {
+                serverText.text = entry.domain
+                portText.text = ":${entry.port} 🔒"
+            } else {
+                serverText.text = entry.server
+                portText.text = ":${entry.port}"
+            }
 
             // Protocol badge
             protocolBadge.text = entry.protocol.uppercase()
