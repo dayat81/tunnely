@@ -161,9 +161,14 @@ object PacketFlowTracker {
         return flows.values
             .sortedByDescending { it.uplinkBytes + it.downlinkBytes }
             .map { f ->
+                // ALWAYS check DomainCache — don't rely on FlowStats.domain alone.
+                // FlowStats.domain is set via @Volatile write inside compute(),
+                // but on ARM the write may not propagate to the UI thread.
+                // DomainCache uses @Synchronized which provides full happens-before.
+                val domain = f.domain ?: DomainCache.getDomain(f.remoteIp)
                 FlowEntry(
                     server = f.remoteIp,
-                    domain = f.domain,
+                    domain = domain,
                     port = f.remotePort,
                     protocol = f.protocol,
                     uplinkBytes = f.uplinkBytes,
