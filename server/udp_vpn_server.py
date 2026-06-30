@@ -597,6 +597,20 @@ class UdpVpnServer:
     def _process_udp_packet(self, data: bytes, addr):
         """Process a single UDP packet from client → write to TUN."""
 
+        # Handle latency probe (magic "TLTP" = 0x544C5450) — 24 bytes
+        if len(data) == PROBE_SIZE and data[0:4] == TLTP_MAGIC:
+            probe_type = data[4]
+            if probe_type == PROBE_REQUEST:
+                now_us = int(time.time() * 1_000_000)
+                response = bytearray(data)
+                response[4] = PROBE_RESPONSE
+                struct.pack_into(">q", response, 16, now_us)
+                try:
+                    self.sock.sendto(bytes(response), addr)
+                except socket.error:
+                    pass
+            return
+
         if len(data) < 20:
             # Handle hello/keepalive packets (magic "TUNN" = 0x54554E4E)
             if len(data) == 4 and data == b"\x54\x55\x4E\x4E":
@@ -605,18 +619,6 @@ class UdpVpnServer:
                     log(f"Hello packet from {addr[0]}:{addr[1]} → {assigned_ip}")
                 else:
                     self.sessions.touch(self.sessions.addr_to_ip[addr])
-            # Handle latency probe (magic "TLTP" = 0x544C5450)
-            if len(data) == PROBE_SIZE and data[0:4] == TLTP_MAGIC:
-                probe_type = data[4]
-                if probe_type == PROBE_REQUEST:
-                    now_us = int(time.time() * 1_000_000)
-                    response = bytearray(data)
-                    response[4] = PROBE_RESPONSE
-                    struct.pack_into(">q", response, 16, now_us)
-                    try:
-                        self.sock.sendto(bytes(response), addr)
-                    except socket.error:
-                        pass
             return  # Not a valid IP packet
 
         src_ip = extract_src_ip(data)

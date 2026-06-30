@@ -489,7 +489,9 @@ class UdpTunnelVpnService : VpnService() {
                         }
                     }
 
-                    Thread.sleep(KEEPALIVE_INTERVAL)
+                    // Sleep in 5s chunks to allow probe timing (not 15s keepalive block)
+                    // Keepalive is sent every iteration (every 5s) — cheap UDP packet
+                    Thread.sleep(LatencyProber.PROBE_INTERVAL_MS)
 
                     // Update traffic stats
                     _trafficStats.value = TrafficStats(
