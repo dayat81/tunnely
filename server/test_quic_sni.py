@@ -160,7 +160,7 @@ class TestHeaderParsing(unittest.TestCase):
         self.assertEqual(header["version"], QUIC_V1)
         self.assertEqual(header["dcid"], dcid)
         self.assertEqual(header["scid"], scid)
-        self.assertEqual(header["pn_length"], 1)
+        self.assertEqual(header["pn_length_hint"], 1)
 
     def test_parse_header_with_token(self):
         """Parse header with non-empty token."""

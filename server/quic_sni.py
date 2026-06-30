@@ -132,13 +132,17 @@ def _is_quic_initial(data: bytes) -> bool:
 
 
 def _parse_quic_header(data: bytes) -> Optional[dict]:
-    """Parse QUIC Initial packet header. Returns None if not valid."""
+    """Parse QUIC Initial packet header. Returns None if not valid.
+    Note: pn_length is read from the PROTECTED first byte and may be wrong.
+    _decrypt_initial() will determine the actual pn_length after unmasking.
+    """
     if not _is_quic_initial(data):
         return None
 
     pos = 0
     first_byte = data[pos]; pos += 1
-    pn_length = (first_byte & 0x03) + 1  # 1-4 bytes
+    # pn_length from protected byte is a hint (upper bound), actual determined after unmasking
+    pn_length_hint = (first_byte & 0x03) + 1  # 1-4 bytes
 
     version = struct.unpack("!I", data[pos:pos+4])[0]
     pos += 4
@@ -168,7 +172,7 @@ def _parse_quic_header(data: bytes) -> Optional[dict]:
         "dcid": dcid,
         "scid": scid,
         "token": token,
-        "pn_length": pn_length,
+        "pn_length_hint": pn_length_hint,
         "payload_length": payload_length,
         "header_end": pos,
     }
@@ -185,7 +189,6 @@ def _decrypt_initial(data: bytes, header: dict) -> Optional[bytes]:
     elif version == QUIC_DRAFT29:
         salt = INITIAL_SALT_V1  # Same salt for draft-29
     elif version == QUIC_V2:
-        # QUIC v2 uses different salt
         salt = bytes.fromhex("a707c203a59b47184317ef6f70b64a1e76ab5765")
     else:
         return None
@@ -199,27 +202,26 @@ def _decrypt_initial(data: bytes, header: dict) -> Optional[bytes]:
     client_hp = _hkdf_expand_label(initial_secret, "quic hp", b"", 16)
 
     header_end = header["header_end"]
-    pn_length = header["pn_length"]
+    # Use pn_length_hint only for initial sampling (sample is always at header_end + 4)
+    pn_length_hint = header.get("pn_length_hint", header.get("pn_length", 1))
 
-    # Step 3: Sample for header protection (16 bytes, 4 bytes before packet number)
+    # Step 3: Sample for header protection (16 bytes starting 4 bytes after PN field start)
     sample_offset = header_end + 4
     if sample_offset + 16 > len(data):
         return None
     sample = data[sample_offset:sample_offset + 16]
 
-    # Step 4: Unmask packet number using AES-ECB
+    # Step 4: Compute mask and unmask first byte to get actual pn_length
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
     cipher = Cipher(algorithms.AES(client_hp), modes.ECB())
     encryptor = cipher.encryptor()
     mask = encryptor.update(sample) + encryptor.finalize()
 
-    # Unmask first byte
-    if pn_length == 1:
-        first_byte = data[0] ^ (mask[0] & 0x0F)
-    else:
-        first_byte = data[0] ^ (mask[0] & 0x0F)
+    # Unmask first byte to get actual pn_length
+    first_byte = data[0] ^ (mask[0] & 0x0F)
+    pn_length = (first_byte & 0x03) + 1  # Actual pn_length after unmasking
 
-    # Unmask packet number
+    # Unmask actual packet number bytes
     pn_bytes = bytearray(data[header_end:header_end + pn_length])
     for i in range(pn_length):
         pn_bytes[i] ^= mask[1 + i]
@@ -237,17 +239,10 @@ def _decrypt_initial(data: bytes, header: dict) -> Optional[bytes]:
     if payload_end > len(data):
         payload_end = len(data)
 
-    # AAD = header (everything before encrypted part)
-    aad = data[:header_end] + data[header_end:header_end + pn_length]
-    # Actually AAD = full header including packet number
-    # But packet number is stored encrypted, so we use the unmasked version
+    # AAD = original unprotected header + packet number
     aad = bytearray(data[:header_end])
-    aad.append(first_byte)
-    aad.extend(pn_bytes)
-
-    # Actually, AAD = original header bytes (before decryption)
-    # The first byte and packet number bytes are in their encrypted form in AAD
-    aad = data[:payload_start]
+    aad[0] = first_byte  # unmasked first byte
+    aad.extend(pn_bytes)  # unmasked packet number
 
     encrypted_payload = data[payload_start:payload_end]
     # Last 16 bytes are the authentication tag
