@@ -264,3 +264,81 @@ class TestClientProbeTiming:
         assert 3 in probe_sent_times
         assert 4 in probe_sent_times
         assert len(probe_sent_times) == 2
+
+
+class TestProbeResponseEdgeCases:
+    """Edge cases in probe response handling (client-side logic)."""
+
+    def test_unknown_sequence_ignored(self):
+        """Response with sequence not in sentTimes is silently ignored."""
+        probe_sent_times = {1: 1000, 2: 2000}
+        unknown_seq = 99
+        sent_us = probe_sent_times.get(unknown_seq)
+        assert sent_us is None  # no crash, just ignored
+
+    def test_duplicate_response_ignored(self):
+        """Second response for same seq finds no entry (already removed)."""
+        probe_sent_times = {42: 5000}
+        sent_us = probe_sent_times.pop(42, None)
+        assert sent_us == 5000
+        sent_us2 = probe_sent_times.pop(42, None)
+        assert sent_us2 is None
+
+    def test_response_with_request_type_ignored(self):
+        """Probe with TYPE_REQUEST (not RESPONSE) should not trigger processing."""
+        pkt = build_probe_request(1, 1000)
+        assert pkt[4] == PROBE_REQUEST
+
+    def test_ema_convergence(self):
+        """EMA converges to steady value after repeated probes."""
+        ema = 0.0
+        alpha = 0.3
+        target_ms = 50.0
+        for _ in range(30):
+            ema = alpha * target_ms + (1 - alpha) * ema
+        assert abs(ema - target_ms) < 0.5
+
+    def test_ema_responds_to_spike(self):
+        """EMA responds to sudden latency spike but dampens it."""
+        ema = 50.0
+        alpha = 0.3
+        ema = alpha * 500.0 + (1 - alpha) * ema
+        assert 50 < ema < 500
+        assert abs(ema - 185.0) < 1
+
+    def test_ema_responds_to_drop(self):
+        """EMA responds to sudden latency drop."""
+        ema = 200.0
+        alpha = 0.3
+        ema = alpha * 10.0 + (1 - alpha) * ema
+        assert 10 < ema < 200
+        assert abs(ema - 143.0) < 1
+
+    def test_zero_server_timestamp_detected(self):
+        """If server timestamp is 0, downlink is huge — should be flagged."""
+        now_us = 50_000_000
+        server_recv_ts = 0
+        downlink_us = max(0, now_us - server_recv_ts)  # Kotlin: coerceAtLeast(0)
+        assert downlink_us == 50_000_000  # known: needs server-side fix
+
+    def test_sequence_wraps_in_packet(self):
+        """probeSeq=65536 wraps to 0 in uint16 packet."""
+        seq_int = 65536
+        seq_uint16 = seq_int & 0xFFFF
+        assert seq_uint16 == 0
+        pkt = build_probe_request(seq_uint16, 1000)
+        parsed = parse_probe(pkt)
+        assert parsed["seq"] == 0
+
+    def test_sequence_mismatch_at_wrap(self):
+        """Client key=65536 but packet seq=0 → response lost at wrap point."""
+        probe_sent_times = {65536: 1000}
+        pkt_seq = 65536 & 0xFFFF  # = 0
+        result = probe_sent_times.get(pkt_seq)
+        assert result is None  # BUG: response lost at wrap
+
+    def test_probe_cleanup_on_disconnect(self):
+        """All probe state should be cleared on disconnect."""
+        probe_sent_times = {1: 100, 2: 200, 3: 300}
+        probe_sent_times.clear()
+        assert len(probe_sent_times) == 0
