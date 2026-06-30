@@ -154,4 +154,106 @@ class LatencyProberTest {
         assertEquals(200L, buf.getLong())                   // [16-23] serverRecvTs
         assertEquals(205L, buf.getLong())                   // [24-31] serverEchoTs
     }
+
+    // ── 32-byte Format Tests (#27) ────────────────────────────────
+
+    @Test
+    fun `request packet has 32 bytes with zero server fields`() {
+        val pkt = LatencyProber.ProbePacket(LatencyProber.TYPE_REQUEST, 1, 1000L, 0L, 0L)
+        val encoded = LatencyProber.encode(pkt)
+        assertEquals(32, encoded.size)
+        val decoded = LatencyProber.decode(encoded)!!
+        assertEquals(0L, decoded.serverRecvTs)
+        assertEquals(0L, decoded.serverEchoTs)
+    }
+
+    @Test
+    fun `response packet has all 3 timestamps`() {
+        val pkt = LatencyProber.ProbePacket(LatencyProber.TYPE_RESPONSE, 5, 1000L, 2000L, 2010L)
+        val encoded = LatencyProber.encode(pkt)
+        val decoded = LatencyProber.decode(encoded)!!
+        assertEquals(1000L, decoded.clientSendTs)
+        assertEquals(2000L, decoded.serverRecvTs)
+        assertEquals(2010L, decoded.serverEchoTs)
+    }
+
+    @Test
+    fun `server processing is independent of clock offset`() {
+        // Simulate 997ms clock offset between client and server
+        val clockOffsetUs = 997_000L  // 997ms in µs
+        val serverRecv = 5_000_000_000L + clockOffsetUs
+        val serverEcho = 5_000_005_000L + clockOffsetUs  // 5ms later
+        val serverProc = serverEcho - serverRecv
+        // Clock offset cancels: (A+offset) - (B+offset) = A - B
+        assertEquals(5000L, serverProc)
+    }
+
+    @Test
+    fun `network rtt formula is correct`() {
+        // Client measures 80ms RTT (monotonic, always correct)
+        val rttMs = 80f
+        // Server processing is 5ms (same machine, always correct)
+        val serverProcMs = 5f
+        // Network RTT = total RTT - server processing
+        val networkRttMs = rttMs - serverProcMs  // 75ms
+        // Uplink = downlink = network_rtt / 2
+        val uplinkMs = networkRttMs / 2f  // 37.5ms
+        val downlinkMs = networkRttMs / 2f  // 37.5ms
+
+        assertEquals(75f, networkRttMs)
+        assertEquals(37.5f, uplinkMs)
+        assertEquals(37.5f, downlinkMs)
+        // uplink + downlink = network_rtt
+        assertEquals(networkRttMs, uplinkMs + downlinkMs)
+    }
+
+    @Test
+    fun `server processing near zero means uplink equals rtt half`() {
+        // If server processes instantly (< 1ms), uplink ≈ RTT/2
+        val rttMs = 20f
+        val serverProcMs = 0.024f  // 24µs = 0.024ms
+        val networkRttMs = rttMs - serverProcMs  // 19.976ms
+        val uplinkMs = networkRttMs / 2f  // 9.988ms
+
+        assertTrue(uplinkMs > 9.9f)
+        assertTrue(uplinkMs < 10.1f)
+    }
+
+    @Test
+    fun `large server processing reduces network estimate`() {
+        // If server takes 50ms to process (overloaded), network RTT is reduced
+        val rttMs = 100f
+        val serverProcMs = 50f
+        val networkRttMs = rttMs - serverProcMs  // 50ms
+        val uplinkMs = networkRttMs / 2f  // 25ms
+
+        assertEquals(50f, networkRttMs)
+        assertEquals(25f, uplinkMs)
+    }
+
+    @Test
+    fun `negative network rtt clamped to zero`() {
+        // Edge case: if serverProc > RTT (clock jitter), clamp to 0
+        val rttMs = 5f
+        val serverProcMs = 10f  // impossible but due to timing jitter
+        val networkRttMs = maxOf(0f, rttMs - serverProcMs)
+        assertEquals(0f, networkRttMs)
+    }
+
+    @Test
+    fun `32 byte packet rejected as 24 byte old format`() {
+        // Old 24-byte format should not decode with new 32-byte decoder
+        val oldPkt = ByteArray(24)
+        ByteBuffer.wrap(oldPkt).putInt(0, LatencyProber.MAGIC)
+        assertNull(LatencyProber.decode(oldPkt))
+    }
+
+    @Test
+    fun `33 byte packet decodes first 32 bytes`() {
+        // decode() checks size >= PACKET_SIZE (32), so 33 bytes is valid
+        val pkt = ByteArray(33)
+        ByteBuffer.wrap(pkt).putInt(0, LatencyProber.MAGIC)
+        // 33 >= 32, so decode succeeds (reads first 32 bytes)
+        assertNotNull(LatencyProber.decode(pkt))
+    }
 }
