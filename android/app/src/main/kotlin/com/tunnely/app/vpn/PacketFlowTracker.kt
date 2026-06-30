@@ -230,6 +230,7 @@ object PacketFlowTracker {
     fun clear() {
         flows.clear()
         DomainCache.clear()
+        serverSniMap = emptyMap()
         totalPacketsProcessed = 0
         uplinkTcpPackets = 0
         sniDomainsExtracted = 0
