@@ -21,13 +21,26 @@ object PacketFlowTracker {
         val remoteIp: String,
         val remotePort: Int,
         val protocol: String,
-        var domain: String? = null,
-        var uplinkBytes: Long = 0,   // TUN → UDP (client → internet)
-        var downlinkBytes: Long = 0, // UDP → TUN (internet → client)
-        var lastSeen: Long = System.currentTimeMillis()
+        @Volatile var domain: String? = null,
+        @Volatile var uplinkBytes: Long = 0,   // TUN → UDP (client → internet)
+        @Volatile var downlinkBytes: Long = 0, // UDP → TUN (internet → client)
+        @Volatile var lastSeen: Long = System.currentTimeMillis()
     )
 
+    // Debug counters — visible via getDebugStats()
+    @Volatile var totalPacketsProcessed: Long = 0
+    @Volatile var uplinkTcpPackets: Long = 0
+    @Volatile var sniDomainsExtracted: Long = 0
+    @Volatile var cacheHits: Long = 0
+
     private val flows = ConcurrentHashMap<String, FlowStats>()
+
+    /** Debug stats for troubleshooting SNI extraction */
+    fun getDebugStats(): String {
+        return "packets=$totalPacketsProcessed, uplinkTcp=$uplinkTcpPackets, " +
+            "sniExtracted=$sniDomainsExtracted, cacheHits=$cacheHits, " +
+            "flows=${flows.size}, cacheSize=${DomainCache.size()}"
+    }
 
     /**
      * Process a raw IP packet and update flow stats.
@@ -64,6 +77,8 @@ object PacketFlowTracker {
             else -> "IP/$protocol"
         }
 
+        totalPacketsProcessed++
+
         // For uplink: remote = dst (internet host)
         // For downlink: remote = src (internet host)
         val remoteIp: String
@@ -80,8 +95,10 @@ object PacketFlowTracker {
         // Works on any TCP port (443, 8443, etc.) — SniParser doesn't check port
         var domain: String? = null
         if (isUplink && protoName == "TCP") {
+            uplinkTcpPackets++
             domain = SniParser.extractSni(packet)
             if (domain != null) {
+                sniDomainsExtracted++
                 DomainCache.putDomain(remoteIp, domain)
             }
         }
@@ -89,6 +106,7 @@ object PacketFlowTracker {
         // Try cache for non-SNI packets (downlink or already cached)
         if (domain == null) {
             domain = DomainCache.getDomain(remoteIp)
+            if (domain != null) cacheHits++
         }
 
         val key = "$remoteIp:$remotePort/$protoName"
@@ -169,6 +187,11 @@ object PacketFlowTracker {
 
     fun clear() {
         flows.clear()
+        DomainCache.clear()
+        totalPacketsProcessed = 0
+        uplinkTcpPackets = 0
+        sniDomainsExtracted = 0
+        cacheHits = 0
     }
 
     private fun ipToString(packet: ByteArray, offset: Int): String {
