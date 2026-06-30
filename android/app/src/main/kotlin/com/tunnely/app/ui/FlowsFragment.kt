@@ -176,7 +176,7 @@ class FlowsFragment : Fragment() {
                                         statsTxRate.text = formatRate(txRate)
                                         statsTxTotal.text = formatBytes(stats.wgTx)
                                         statsFlows.text = "${stats.activeFlows}"
-                                        statsFlowsTotal.text = "${stats.totalFlows} total | ${PacketFlowTracker.getDebugStats()}"
+                                        statsFlowsTotal.text = "${stats.totalFlows} total"
                                     }
                                     kotlinx.coroutines.delay(3000)
                                 }
