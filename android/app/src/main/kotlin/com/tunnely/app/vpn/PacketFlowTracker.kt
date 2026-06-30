@@ -53,6 +53,9 @@ object PacketFlowTracker {
             "tls=$tlsRecordsSeen ch=$clientHellosSeen " +
             "parse=$sniParseAttempts fail=$sniParseFailures " +
             "sni=$sniDomainsExtracted cache=$cacheHits/${DomainCache.size()}\n" +
+            "err:${SniParser.lastError} sid=${SniParser.lastSessionIdLen} " +
+            "cs=${SniParser.lastCipherSuitesLen} comp=${SniParser.lastCompressionLen} " +
+            "ext=${SniParser.lastExtensionsLen}/${SniParser.lastExtensionsEnd}/${SniParser.lastPacketSize}\n" +
             "$flowDomains"
     }
 

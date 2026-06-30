@@ -13,6 +13,16 @@ object SniParser {
     private const val SNI_EXTENSION: Int = 0x0000
     private const val SNI_HOST_NAME: Byte = 0x00
 
+    // Diagnostic: tracks where parser bails
+    @Volatile var lastError: String = ""
+    @Volatile var lastPacketSize: Int = 0
+    @Volatile var lastPayloadStart: Int = 0
+    @Volatile var lastSessionIdLen: Int = -1
+    @Volatile var lastCipherSuitesLen: Int = -1
+    @Volatile var lastCompressionLen: Int = -1
+    @Volatile var lastExtensionsLen: Int = -1
+    @Volatile var lastExtensionsEnd: Int = -1
+
     /**
      * Extract SNI domain from a raw IP packet.
      * Returns null if not a TLS ClientHello or no SNI found.
@@ -59,33 +69,64 @@ object SniParser {
      * Parse TLS ClientHello to extract SNI extension.
      */
     private fun parseClientHello(data: ByteArray, offset: Int): String? {
-        if (data.size < offset + 34) return null // Minimum ClientHello size
+        lastPacketSize = data.size
+        lastPayloadStart = offset
+        lastSessionIdLen = -1
+        lastCipherSuitesLen = -1
+        lastCompressionLen = -1
+        lastExtensionsLen = -1
+        lastExtensionsEnd = -1
+
+        if (data.size < offset + 38) {
+            lastError = "tooSmall:${data.size}<${offset + 38}"
+            return null
+        }
 
         // Skip: handshake type (1) + length (3) + client version (2) + random (32)
         var pos = offset + 38
 
         // Session ID (1 byte length + variable)
-        if (pos >= data.size) return null
+        if (pos >= data.size) {
+            lastError = "noSessionIdLen:pos=$pos>=${data.size}"
+            return null
+        }
         val sessionIdLen = data[pos].toInt() and 0xFF
+        lastSessionIdLen = sessionIdLen
         pos += 1 + sessionIdLen
 
         // Cipher Suites (2 byte length + variable)
-        if (pos + 2 > data.size) return null
+        if (pos + 2 > data.size) {
+            lastError = "noCipherLen:pos=$pos+2>${data.size}"
+            return null
+        }
         val cipherSuitesLen = ((data[pos].toInt() and 0xFF) shl 8) or (data[pos + 1].toInt() and 0xFF)
+        lastCipherSuitesLen = cipherSuitesLen
         pos += 2 + cipherSuitesLen
 
         // Compression Methods (1 byte length + variable)
-        if (pos >= data.size) return null
+        if (pos >= data.size) {
+            lastError = "noCompressionLen:pos=$pos>=${data.size}"
+            return null
+        }
         val compressionLen = data[pos].toInt() and 0xFF
+        lastCompressionLen = compressionLen
         pos += 1 + compressionLen
 
         // Extensions (2 byte length + variable)
-        if (pos + 2 > data.size) return null
+        if (pos + 2 > data.size) {
+            lastError = "noExtLen:pos=$pos+2>${data.size}"
+            return null
+        }
         val extensionsLen = ((data[pos].toInt() and 0xFF) shl 8) or (data[pos + 1].toInt() and 0xFF)
+        lastExtensionsLen = extensionsLen
         pos += 2
 
         val extensionsEnd = pos + extensionsLen
-        if (extensionsEnd > data.size) return null
+        lastExtensionsEnd = extensionsEnd
+        if (extensionsEnd > data.size) {
+            lastError = "extEndOverflow:$extensionsEnd>${data.size}"
+            return null
+        }
 
         // Parse extensions looking for SNI (type 0x0000)
         while (pos + 4 <= extensionsEnd) {
@@ -100,6 +141,7 @@ object SniParser {
             pos += extLen
         }
 
+        lastError = "noSniExt:pos=$pos end=$extensionsEnd"
         return null
     }
 
