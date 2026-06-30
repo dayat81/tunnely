@@ -37,9 +37,15 @@ object PacketFlowTracker {
 
     /** Debug stats for troubleshooting SNI extraction */
     fun getDebugStats(): String {
+        val flowDomains = flows.values
+            .sortedByDescending { it.uplinkBytes + it.downlinkBytes }
+            .take(3)
+            .map { f -> "${f.remoteIp}:${f.remotePort}=${f.domain ?: "NULL"}" }
+            .joinToString("; ")
         return "packets=$totalPacketsProcessed, uplinkTcp=$uplinkTcpPackets, " +
             "sniExtracted=$sniDomainsExtracted, cacheHits=$cacheHits, " +
-            "flows=${flows.size}, cacheSize=${DomainCache.size()}"
+            "flows=${flows.size}, cacheSize=${DomainCache.size()}\n" +
+            "domains: $flowDomains"
     }
 
     /**

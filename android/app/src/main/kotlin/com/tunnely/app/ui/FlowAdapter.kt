@@ -43,6 +43,13 @@ class FlowAdapter : ListAdapter<FlowEntry, FlowAdapter.FlowViewHolder>(FlowDiffC
                 portText.text = ":${entry.port}"
             }
 
+            // Debug: show raw domain state in port text (always visible)
+            portText.text = if (entry.domain != null) {
+                "🔒 ${entry.domain}"
+            } else {
+                ":${entry.port} [no-sni]"
+            }
+
             // Protocol badge
             protocolBadge.text = entry.protocol.uppercase()
             val badgeColor = if (entry.protocol.uppercase().startsWith("TCP")) {
