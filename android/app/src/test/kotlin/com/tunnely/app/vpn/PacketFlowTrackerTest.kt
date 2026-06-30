@@ -316,6 +316,35 @@ class PacketFlowTrackerTest {
         assertEquals(0, flows.size)
     }
 
+    @Test
+    fun `empty packet ignored`() {
+        val pkt = ByteArray(0)
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+
+        val flows = PacketFlowTracker.getFlows()
+        assertEquals(0, flows.size)
+    }
+
+    @Test
+    fun `ICMP packet tracked as IP protocol`() {
+        val pkt = ByteArray(28)
+        pkt[0] = 0x45.toByte()
+        pkt[2] = 0x00
+        pkt[3] = 28
+        pkt[8] = 64
+        pkt[9] = 1  // ICMP
+        // Source: 10.20.0.2
+        pkt[12] = 10; pkt[13] = 20; pkt[14] = 0; pkt[15] = 2
+        // Dest: 8.8.8.8
+        pkt[16] = 8; pkt[17] = 8; pkt[18] = 8; pkt[19] = 8
+
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+
+        val flows = PacketFlowTracker.getFlows()
+        assertEquals(1, flows.size)
+        assertEquals("ICMP", flows[0].protocol)
+    }
+
     // ── TCP Flow Tests ────────────────────────────────────────────────
 
     @Test
@@ -552,5 +581,234 @@ class PacketFlowTrackerTest {
         val entry = FlowEntry("1.2.3.4", null, 80, "TCP", 1536, 1048576)
         assertEquals("1 KB", entry.displayUplink)
         assertEquals("1.0 MB", entry.displayDownlink)
+    }
+
+    // ── Additional Edge Cases ─────────────────────────────────────────
+
+    @Test
+    fun `downlink TLS does not extract domain`() {
+        // SNI only in uplink (ClientHello)
+        val pkt = buildTlsClientHelloWithSni("140.82.121.6", "10.20.0.2", 443, 54321, "api.github.com")
+        PacketFlowTracker.processPacket(pkt, isUplink = false)
+
+        // Domain should NOT be extracted (downlink)
+        assertNull(DomainCache.getDomain("140.82.121.6"))
+    }
+
+    @Test
+    fun `non-port-443 TLS extracts domain`() {
+        // TLS on non-standard port (e.g., 8443)
+        val pkt = buildTlsClientHelloWithSni("10.20.0.2", "140.82.121.6", 54321, 8443, "api.github.com")
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+
+        val flows = PacketFlowTracker.getFlows()
+        assertEquals(1, flows.size)
+        // Domain should still be extracted (SNI parser doesn't check port)
+        assertEquals("api.github.com", flows[0].domain)
+    }
+
+    @Test
+    fun `domain lowercase normalization`() {
+        val pkt = buildTlsClientHelloWithSni("10.20.0.2", "140.82.121.6", 54321, 443, "API.GITHUB.COM")
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+
+        // DomainCache normalizes to lowercase
+        assertEquals("api.github.com", DomainCache.getDomain("140.82.121.6"))
+    }
+
+    @Test
+    fun `multiple packets same domain same flow`() {
+        val pkt1 = buildTlsClientHelloWithSni("10.20.0.2", "140.82.121.6", 54321, 443, "api.github.com")
+        val pkt2 = buildTcpPacket("10.20.0.2", "140.82.121.6", 54321, 443, 1000)
+
+        PacketFlowTracker.processPacket(pkt1, isUplink = true)
+        PacketFlowTracker.processPacket(pkt2, isUplink = true)
+
+        val flows = PacketFlowTracker.getFlows()
+        assertEquals(1, flows.size)
+        assertEquals("api.github.com", flows[0].domain)
+    }
+
+    @Test
+    fun `flow without domain shows IP port combo`() {
+        val pkt = buildTcpPacket("10.20.0.2", "142.250.66.46", 54322, 80, 500)
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+
+        val flows = PacketFlowTracker.getFlows()
+        assertEquals("142.250.66.46:80", flows[0].displayServerWithPort)
+    }
+
+    @Test
+    fun `flow with domain hides port in displayServer`() {
+        val pkt = buildTlsClientHelloWithSni("10.20.0.2", "140.82.121.6", 54321, 443, "api.github.com")
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+
+        val flows = PacketFlowTracker.getFlows()
+        // displayServer shows domain only (no port)
+        assertEquals("api.github.com", flows[0].displayServer)
+        // displayServerWithPort shows domain + port
+        assertEquals("api.github.com:443", flows[0].displayServerWithPort)
+    }
+
+    @Test
+    fun `UDP flow never has domain`() {
+        // UDP packets don't have SNI (SNI is TLS/TCP only)
+        val pkt = buildUdpPacket("10.20.0.2", "8.8.8.8", 54321, 53, 100)
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+
+        val flows = PacketFlowTracker.getFlows()
+        assertEquals(1, flows.size)
+        assertNull(flows[0].domain)
+    }
+
+    @Test
+    fun `ICMP flow never has domain`() {
+        val pkt = ByteArray(28)
+        pkt[0] = 0x45.toByte()
+        pkt[2] = 0x00
+        pkt[3] = 28
+        pkt[8] = 64
+        pkt[9] = 1  // ICMP
+        pkt[12] = 10; pkt[13] = 20; pkt[14] = 0; pkt[15] = 2
+        pkt[16] = 8; pkt[17] = 8; pkt[18] = 8; pkt[19] = 8
+
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+
+        val flows = PacketFlowTracker.getFlows()
+        assertEquals(1, flows.size)
+        assertNull(flows[0].domain)
+    }
+
+    @Test
+    fun `clear also clears domain cache`() {
+        val pkt = buildTlsClientHelloWithSni("10.20.0.2", "140.82.121.6", 54321, 443, "api.github.com")
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+
+        PacketFlowTracker.clear()
+        DomainCache.clear()
+
+        // After clear, domain cache should be empty
+        assertNull(DomainCache.getDomain("140.82.121.6"))
+    }
+
+    @Test
+    fun `domain preserved after flow update`() {
+        // First: TLS with domain
+        val tlsPkt = buildTlsClientHelloWithSni("10.20.0.2", "140.82.121.6", 54321, 443, "api.github.com")
+        PacketFlowTracker.processPacket(tlsPkt, isUplink = true)
+
+        // Second: more data (no domain in packet)
+        val dataPkt = buildTcpPacket("10.20.0.2", "140.82.121.6", 54321, 443, 5000)
+        PacketFlowTracker.processPacket(dataPkt, isUplink = true)
+
+        val flows = PacketFlowTracker.getFlows()
+        assertEquals(1, flows.size)
+        // Domain should still be there
+        assertEquals("api.github.com", flows[0].domain)
+        // Bytes should be updated
+        assertTrue(flows[0].uplinkBytes > 5000)
+    }
+
+    @Test
+    fun `very long domain name handled`() {
+        val longDomain = "a".repeat(63) + ".example.com"
+        val pkt = buildTlsClientHelloWithSni("10.20.0.2", "140.82.121.6", 54321, 443, longDomain)
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+
+        val flows = PacketFlowTracker.getFlows()
+        assertEquals(1, flows.size)
+        assertEquals(longDomain, flows[0].domain)
+    }
+
+    @Test
+    fun `domain with hyphens handled`() {
+        val pkt = buildTlsClientHelloWithSni("10.20.0.2", "140.82.121.6", 54321, 443, "my-app.example.com")
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+
+        val flows = PacketFlowTracker.getFlows()
+        assertEquals("my-app.example.com", flows[0].domain)
+    }
+
+    @Test
+    fun `domain with numbers handled`() {
+        val pkt = buildTlsClientHelloWithSni("10.20.0.2", "140.82.121.6", 54321, 443, "api2.example.com")
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+
+        val flows = PacketFlowTracker.getFlows()
+        assertEquals("api2.example.com", flows[0].domain)
+    }
+
+    @Test
+    fun `FlowEntry equality with domain`() {
+        val entry1 = FlowEntry("1.2.3.4", "example.com", 443, "TCP", 100, 200)
+        val entry2 = FlowEntry("1.2.3.4", "example.com", 443, "TCP", 100, 200)
+        assertEquals(entry1, entry2)
+    }
+
+    @Test
+    fun `FlowEntry inequality different domain`() {
+        val entry1 = FlowEntry("1.2.3.4", "a.com", 443, "TCP", 100, 200)
+        val entry2 = FlowEntry("1.2.3.4", "b.com", 443, "TCP", 100, 200)
+        assertNotEquals(entry1, entry2)
+    }
+
+    @Test
+    fun `FlowEntry copy preserves domain`() {
+        val entry = FlowEntry("1.2.3.4", "example.com", 443, "TCP", 100, 200)
+        val updated = entry.copy(uplinkBytes = 500)
+        assertEquals("example.com", updated.domain)
+        assertEquals(500L, updated.uplinkBytes)
+    }
+
+    @Test
+    fun `FlowEntry copy can change domain`() {
+        val entry = FlowEntry("1.2.3.4", "old.com", 443, "TCP", 100, 200)
+        val updated = entry.copy(domain = "new.com")
+        assertEquals("new.com", updated.domain)
+    }
+
+    @Test
+    fun `FlowEntry zero bytes formatting`() {
+        val entry = FlowEntry("1.2.3.4", null, 80, "TCP", 0, 0)
+        assertEquals("0 B", entry.displayUplink)
+        assertEquals("0 B", entry.displayDownlink)
+    }
+
+    @Test
+    fun `FlowEntry large bytes formatting GB`() {
+        val entry = FlowEntry("1.2.3.4", null, 80, "TCP", 0, 2147483648L) // 2 GB
+        assertEquals("2.00 GB", entry.displayDownlink)
+    }
+
+    @Test
+    fun `multiple flows sorted by domain`() {
+        val pkt1 = buildTlsClientHelloWithSni("10.20.0.2", "1.1.1.1", 54321, 443, "z.com")
+        val pkt2 = buildTlsClientHelloWithSni("10.20.0.2", "2.2.2.2", 54322, 443, "a.com")
+
+        PacketFlowTracker.processPacket(pkt1, isUplink = true)
+        PacketFlowTracker.processPacket(pkt2, isUplink = true)
+
+        val flows = PacketFlowTracker.getFlows()
+        assertEquals(2, flows.size)
+        // Both should have domains
+        assertNotNull(flows[0].domain)
+        assertNotNull(flows[1].domain)
+    }
+
+    @Test
+    fun `private IP gets domain from cache`() {
+        // First: TLS to private IP
+        val pkt = buildTlsClientHelloWithSni("10.20.0.2", "192.168.1.1", 54321, 443, "router.local")
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+
+        assertEquals("router.local", DomainCache.getDomain("192.168.1.1"))
+    }
+
+    @Test
+    fun `localhost IP gets domain from cache`() {
+        val pkt = buildTlsClientHelloWithSni("10.20.0.2", "127.0.0.1", 54321, 443, "localhost")
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+
+        assertEquals("localhost", DomainCache.getDomain("127.0.0.1"))
     }
 }

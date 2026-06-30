@@ -77,8 +77,9 @@ object PacketFlowTracker {
         }
 
         // Extract SNI domain from TLS ClientHello (uplink only)
+        // Works on any TCP port (443, 8443, etc.) — SniParser doesn't check port
         var domain: String? = null
-        if (isUplink && protoName == "TCP" && dstPort == 443) {
+        if (isUplink && protoName == "TCP") {
             domain = SniParser.extractSni(packet)
             if (domain != null) {
                 DomainCache.putDomain(remoteIp, domain)
