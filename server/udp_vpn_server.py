@@ -660,6 +660,10 @@ class UdpVpnServer:
         if self._should_debug_log():
             log(f"  [RX] {assigned_ip}→{dst_ip} {proto_name} {len(data)}B")
 
+        # Track TCP/TLS for debugging
+        if proto == 6:  # TCP
+            self._track_tcp_flow(data, assigned_ip, dst_ip)
+
         try:
             os.write(self.tun_fd, data)
         except OSError as e:
@@ -711,6 +715,131 @@ class UdpVpnServer:
             self._debug_counter = 0
             return True
         return False
+
+    # TCP/TLS flow tracking for debugging
+    _tcp_tracker = {}  # client_ip -> {dst_ip:port -> {syn, established, tls_hello, sni}}
+    _tls_sni_log = []  # recent SNI domains seen
+
+    def _track_tcp_flow(self, data: bytes, client_ip: str, dst_ip: str):
+        """Track TCP connection state and TLS ClientHello/SNI."""
+        if len(data) < 40:  # IP(20) + TCP(20) minimum
+            return
+
+        ihl = (data[0] & 0x0F) * 4
+        if len(data) < ihl + 14:  # need at least TCP flags
+            return
+
+        tcp_flags = data[ihl + 13] & 0x3F
+        dst_port = ((data[ihl + 2] & 0xFF) << 8) | (data[ihl + 3] & 0xFF)
+        flow_key = f"{dst_ip}:{dst_port}"
+
+        # Get or create client tracker
+        if client_ip not in self._tcp_tracker:
+            self._tcp_tracker[client_ip] = {}
+
+        client_flows = self._tcp_tracker[client_ip]
+        if flow_key not in client_flows:
+            client_flows[flow_key] = {"syn": 0, "established": False, "tls_hello": 0, "sni": None}
+
+        flow = client_flows[flow_key]
+
+        # SYN flag (bit 1)
+        if tcp_flags & 0x02:
+            flow["syn"] += 1
+
+        # Check for TLS ClientHello in TCP payload
+        payload_start = ihl + ((data[ihl + 12] & 0xF0) >> 2)  # data offset
+        if len(data) > payload_start + 5:
+            tls_content_type = data[payload_start]
+            tls_version = ((data[payload_start + 1] & 0xFF) << 8) | (data[payload_start + 2] & 0xFF)
+            # TLS Handshake (0x16) with version >= TLS 1.0 (0x0301)
+            if tls_content_type == 0x16 and tls_version >= 0x0301:
+                handshake_type = data[payload_start + 5] if len(data) > payload_start + 5 else -1
+                if handshake_type == 0x01:  # ClientHello
+                    flow["tls_hello"] += 1
+                    # Try to extract SNI
+                    sni = self._extract_sni_from_payload(data, payload_start + 5)
+                    if sni:
+                        flow["sni"] = sni
+                        self._tls_sni_log.append(f"{client_ip}→{dst_ip}:{dst_port} = {sni}")
+                        # Keep only last 50 entries
+                        if len(self._tls_sni_log) > 50:
+                            self._tls_sni_log.pop(0)
+                        log(f"  [TLS] {client_ip}→{dst_ip}:{dst_port} SNI={sni}")
+
+        # Mark established on SYN-ACK (from server) or ACK after SYN
+        if tcp_flags & 0x10:  # ACK
+            flow["established"] = True
+
+    def _extract_sni_from_payload(self, data: bytes, ch_offset: int) -> str:
+        """Extract SNI from TLS ClientHello at given offset."""
+        try:
+            if len(data) < ch_offset + 38:
+                return None
+            # Skip: handshake type(1) + length(3) + version(2) + random(32) = 38
+            pos = ch_offset + 38
+            # Session ID
+            if pos >= len(data):
+                return None
+            session_id_len = data[pos] & 0xFF
+            pos += 1 + session_id_len
+            # Cipher Suites
+            if pos + 2 > len(data):
+                return None
+            cs_len = ((data[pos] & 0xFF) << 8) | (data[pos + 1] & 0xFF)
+            pos += 2 + cs_len
+            # Compression
+            if pos >= len(data):
+                return None
+            comp_len = data[pos] & 0xFF
+            pos += 1 + comp_len
+            # Extensions
+            if pos + 2 > len(data):
+                return None
+            ext_len = ((data[pos] & 0xFF) << 8) | (data[pos + 1] & 0xFF)
+            pos += 2
+            ext_end = pos + ext_len
+            if ext_end > len(data):
+                return None
+            # Find SNI extension (type 0x0000)
+            while pos + 4 <= ext_end:
+                ext_type = ((data[pos] & 0xFF) << 8) | (data[pos + 1] & 0xFF)
+                ext_data_len = ((data[pos + 2] & 0xFF) << 8) | (data[pos + 3] & 0xFF)
+                pos += 4
+                if ext_type == 0x0000:  # SNI
+                    if pos + 2 > len(data):
+                        return None
+                    sni_list_len = ((data[pos] & 0xFF) << 8) | (data[pos + 1] & 0xFF)
+                    pos += 2
+                    if pos + 3 > len(data):
+                        return None
+                    name_type = data[pos]
+                    name_len = ((data[pos + 1] & 0xFF) << 8) | (data[pos + 2] & 0xFF)
+                    pos += 3
+                    if name_type == 0x00 and pos + name_len <= len(data):
+                        return data[pos:pos + name_len].decode('ascii', errors='ignore')
+                pos += ext_data_len
+        except Exception:
+            pass
+        return None
+
+    def get_tcp_debug_summary(self) -> str:
+        """Get summary of TCP/TLS flows for HTTP stats."""
+        total_tls = 0
+        total_sni = 0
+        recent_snis = list(self._tls_sni_log[-10:])
+        for client_flows in self._tcp_tracker.values():
+            for flow in client_flows.values():
+                if flow["tls_hello"] > 0:
+                    total_tls += 1
+                if flow["sni"]:
+                    total_sni += 1
+        return {
+            "tcp_flows": sum(len(f) for f in self._tcp_tracker.values()),
+            "tls_handshakes": total_tls,
+            "sni_domains": total_sni,
+            "recent_snis": recent_snis,
+        }
 
     def _forward_dns(self, packet: bytes, orig_dns_ip: str, client_ip: str, client_addr):
         """Forward DNS query to 8.8.8.8, track for response rewriting."""
@@ -1009,6 +1138,7 @@ class StatsHttpHandler(BaseHTTPRequestHandler):
             return
 
         stats = srv.sessions.stats()
+        tcp_debug = srv.get_tcp_debug_summary()
         data = {
             "version": __version__,
             "uptime_seconds": int(time.time() - srv.start_time),
@@ -1021,6 +1151,7 @@ class StatsHttpHandler(BaseHTTPRequestHandler):
             "ext_iface": srv.ext_iface,
             "udp_port": srv.port,
             "dns_forwarder_port": srv.dns_sock.getsockname()[1] if srv.dns_sock else None,
+            "tcp_debug": tcp_debug,
         }
         body = json.dumps(data).encode()
         self.send_response(200)
