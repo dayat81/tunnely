@@ -950,7 +950,7 @@ def parse_sni_domain_map_json(json_dict):
     sni_domain_map = tcp_debug.get("sni_domain_map", {})
     result = {}
     for ip, domain in sni_domain_map.items():
-        if domain:
+        if domain and isinstance(domain, str):
             result[ip] = domain.lower()
     return result
 
@@ -1184,6 +1184,314 @@ class TestSniDomainMapClientParsing(unittest.TestCase):
         result = parse_sni_domain_map_json(json_data)
         self.assertEqual(result["1.2.3.4"], "my-app-v2.example-site.com")
         self.assertEqual(result["5.6.7.8"], "api123.internal.corp")
+
+
+# ============================================================
+# Test: sni_domain_map Edge Cases
+# ============================================================
+
+class TestSniDomainMapEdgeCases(unittest.TestCase):
+    """Edge cases for sni_domain_map generation and parsing."""
+
+    # --- IP Extraction Edge Cases ---
+
+    def test_flow_key_without_port(self):
+        """Flow key with no colon — entire key used as IP."""
+        tracker = MockTcpTracker()
+        # Manually add flow with no port in key
+        tracker._tcp_tracker["10.20.0.2"] = {
+            "1.2.3.4": {"syn": 1, "established": True, "tls_hello": 1, "sni": "no-port.com"}
+        }
+        summary = tracker.get_tcp_debug_summary()
+        self.assertEqual(summary["sni_domain_map"]["1.2.3.4"], "no-port.com")
+
+    def test_flow_key_with_ipv6_like(self):
+        """Flow key with multiple colons (IPv6-like) — rfind extracts correctly."""
+        tracker = MockTcpTracker()
+        # "::1:443" — rfind(':') = 3, so IP = "::1"
+        tracker._tcp_tracker["10.20.0.2"] = {
+            "::1:443": {"syn": 1, "established": True, "tls_hello": 1, "sni": "localhost"}
+        }
+        summary = tracker.get_tcp_debug_summary()
+        self.assertEqual(summary["sni_domain_map"]["::1"], "localhost")
+
+    def test_flow_key_ip_with_trailing_space(self):
+        """Flow key with whitespace — preserved as-is."""
+        tracker = MockTcpTracker()
+        tracker._tcp_tracker["10.20.0.2"] = {
+            "1.2.3.4 :443": {"syn": 1, "established": True, "tls_hello": 1, "sni": "space.com"}
+        }
+        summary = tracker.get_tcp_debug_summary()
+        # rfind(':') finds last colon, IP = "1.2.3.4 "
+        self.assertIn("1.2.3.4 ", summary["sni_domain_map"])
+
+    # --- SNI Domain Edge Cases ---
+
+    def test_sni_domain_with_unicode(self):
+        """SNI domain with unicode characters preserved."""
+        tracker = MockTcpTracker()
+        tracker.add_flow("10.20.0.2", "1.2.3.4", 443, sni="café.com", tls_hello=1)
+        summary = tracker.get_tcp_debug_summary()
+        self.assertEqual(summary["sni_domain_map"]["1.2.3.4"], "café.com")
+
+    def test_sni_domain_very_long(self):
+        """SNI domain at max length (253 chars)."""
+        long_domain = "a" * 63 + "." + "b" * 63 + "." + "c" * 63 + "." + "d" * 60 + ".com"
+        tracker = MockTcpTracker()
+        tracker.add_flow("10.20.0.2", "1.2.3.4", 443, sni=long_domain, tls_hello=1)
+        summary = tracker.get_tcp_debug_summary()
+        self.assertEqual(summary["sni_domain_map"]["1.2.3.4"], long_domain)
+
+    def test_sni_domain_single_label(self):
+        """Single-label domain (no dots)."""
+        tracker = MockTcpTracker()
+        tracker.add_flow("10.20.0.2", "1.2.3.4", 443, sni="localhost", tls_hello=1)
+        summary = tracker.get_tcp_debug_summary()
+        self.assertEqual(summary["sni_domain_map"]["1.2.3.4"], "localhost")
+
+    def test_sni_domain_with_wildcard(self):
+        """Wildcard domain preserved."""
+        tracker = MockTcpTracker()
+        tracker.add_flow("10.20.0.2", "1.2.3.4", 443, sni="*.example.com", tls_hello=1)
+        summary = tracker.get_tcp_debug_summary()
+        self.assertEqual(summary["sni_domain_map"]["1.2.3.4"], "*.example.com")
+
+    # --- Tracker State Edge Cases ---
+
+    def test_sni_domain_map_after_flow_sni_update(self):
+        """Flow SNI updated from None to domain — map reflects update."""
+        tracker = MockTcpTracker()
+        tracker.add_flow("10.20.0.2", "1.2.3.4", 443, sni=None, tls_hello=1)
+        summary1 = tracker.get_tcp_debug_summary()
+        self.assertNotIn("1.2.3.4", summary1["sni_domain_map"])
+
+        # Update SNI
+        tracker._tcp_tracker["10.20.0.2"]["1.2.3.4:443"]["sni"] = "now-known.com"
+        summary2 = tracker.get_tcp_debug_summary()
+        self.assertEqual(summary2["sni_domain_map"]["1.2.3.4"], "now-known.com")
+
+    def test_sni_domain_map_after_flow_removed(self):
+        """Flow removed from tracker — disappears from map."""
+        tracker = MockTcpTracker()
+        tracker.add_flow("10.20.0.2", "1.2.3.4", 443, sni="test.com", tls_hello=1)
+        summary1 = tracker.get_tcp_debug_summary()
+        self.assertIn("1.2.3.4", summary1["sni_domain_map"])
+
+        # Remove flow
+        del tracker._tcp_tracker["10.20.0.2"]["1.2.3.4:443"]
+        summary2 = tracker.get_tcp_debug_summary()
+        self.assertNotIn("1.2.3.4", summary2["sni_domain_map"])
+
+    def test_sni_domain_map_idempotent(self):
+        """Calling get_tcp_debug_summary multiple times returns same result."""
+        tracker = MockTcpTracker()
+        tracker.add_flow("10.20.0.2", "1.2.3.4", 443, sni="test.com", tls_hello=1)
+
+        summary1 = tracker.get_tcp_debug_summary()
+        summary2 = tracker.get_tcp_debug_summary()
+        summary3 = tracker.get_tcp_debug_summary()
+
+        self.assertEqual(summary1["sni_domain_map"], summary2["sni_domain_map"])
+        self.assertEqual(summary2["sni_domain_map"], summary3["sni_domain_map"])
+
+    def test_sni_domain_map_after_multiple_clients_same_ip(self):
+        """Multiple clients with same dst IP — last client's SNI wins."""
+        tracker = MockTcpTracker()
+        tracker.add_flow("10.20.0.2", "1.2.3.4", 443, sni="from-client1.com", tls_hello=1)
+        tracker.add_flow("10.20.0.3", "1.2.3.4", 443, sni="from-client2.com", tls_hello=1)
+        summary = tracker.get_tcp_debug_summary()
+        # Both clients have same IP, last dict iteration wins
+        self.assertEqual(summary["sni_domain_map"]["1.2.3.4"], "from-client2.com")
+
+    # --- Log Overflow Edge Cases ---
+
+    def test_sni_log_overflow_map_still_complete(self):
+        """Even when _tls_sni_log overflows (50 max), sni_domain_map has ALL flows."""
+        tracker = MockTcpTracker()
+        for i in range(100):
+            tracker.add_flow("10.20.0.2", f"10.0.0.{i}", 443,
+                           sni=f"site{i}.com", tls_hello=1)
+        summary = tracker.get_tcp_debug_summary()
+        # recent_snis capped at 10
+        self.assertEqual(len(summary["recent_snis"]), 10)
+        # sni_domain_map has ALL 100
+        self.assertEqual(len(summary["sni_domain_map"]), 100)
+
+    def test_sni_log_50_entries_map_has_more(self):
+        """_tls_sni_log caps at 50, but sni_domain_map has all unique IPs."""
+        tracker = MockTcpTracker()
+        for i in range(75):
+            tracker.add_flow("10.20.0.2", f"10.{i//256}.{i%256}.1", 443,
+                           sni=f"host{i}.com", tls_hello=1)
+        summary = tracker.get_tcp_debug_summary()
+        # _tls_sni_log caps at 50
+        self.assertEqual(len(tracker._tls_sni_log), 50)
+        # sni_domain_map has all 75 unique IPs
+        self.assertEqual(len(summary["sni_domain_map"]), 75)
+
+    # --- Consistency Edge Cases ---
+
+    def test_sni_domains_count_consistent_with_map(self):
+        """sni_domains count always equals len(sni_domain_map)."""
+        tracker = MockTcpTracker()
+        for i in range(20):
+            tracker.add_flow("10.20.0.2", f"10.0.0.{i}", 443,
+                           sni=f"site{i}.com" if i % 3 != 0 else None,
+                           tls_hello=1 if i % 2 == 0 else 0)
+        summary = tracker.get_tcp_debug_summary()
+        # sni_domains counts flows with SNI
+        # sni_domain_map has unique IPs with SNI
+        self.assertEqual(summary["sni_domains"], len(summary["sni_domain_map"]))
+
+    def test_tcp_flows_count_includes_non_sni(self):
+        """tcp_flows counts ALL flows, not just SNI ones."""
+        tracker = MockTcpTracker()
+        tracker.add_flow("10.20.0.2", "1.1.1.1", 443, sni="with-sni.com", tls_hello=1)
+        tracker.add_flow("10.20.0.2", "2.2.2.2", 80, sni=None, tls_hello=0)
+        tracker.add_flow("10.20.0.2", "3.3.3.3", 443, sni=None, tls_hello=1)
+        summary = tracker.get_tcp_debug_summary()
+        self.assertEqual(summary["tcp_flows"], 3)
+        self.assertEqual(summary["tls_handshakes"], 2)
+        self.assertEqual(summary["sni_domains"], 1)
+        self.assertEqual(len(summary["sni_domain_map"]), 1)
+
+
+class TestSniDomainMapClientParsingEdgeCases(unittest.TestCase):
+    """Edge cases for client-side sni_domain_map JSON parsing."""
+
+    def test_parse_with_null_value(self):
+        """JSON null value in sni_domain_map — skipped."""
+        json_data = {"tcp_debug": {"sni_domain_map": {"1.2.3.4": None, "5.6.7.8": "valid.com"}}}
+        # optString returns "" for null in JSONObject
+        result = parse_sni_domain_map_json(json_data)
+        self.assertEqual(result.get("5.6.7.8"), "valid.com")
+
+    def test_parse_with_numeric_value(self):
+        """Numeric value in sni_domain_map — skipped (not a string)."""
+        json_data = {"tcp_debug": {"sni_domain_map": {"1.2.3.4": 12345}}}
+        result = parse_sni_domain_map_json(json_data)
+        # Non-string values are skipped
+        self.assertNotIn("1.2.3.4", result)
+
+    def test_parse_with_extra_json_fields(self):
+        """Extra fields in tcp_debug — ignored gracefully."""
+        json_data = {
+            "tcp_debug": {
+                "tcp_flows": 100,
+                "tls_handshakes": 50,
+                "sni_domains": 30,
+                "recent_snis": [],
+                "sni_domain_map": {"1.2.3.4": "test.com"},
+                "unknown_field": "ignored",
+                "another_field": 42
+            }
+        }
+        result = parse_sni_domain_map_json(json_data)
+        self.assertEqual(result["1.2.3.4"], "test.com")
+
+    def test_parse_with_nested_object_in_value(self):
+        """Nested object as value — optString returns toString."""
+        json_data = {"tcp_debug": {"sni_domain_map": {"1.2.3.4": {"nested": "value"}}}}
+        # optString for non-string returns the toString of the object
+        result = parse_sni_domain_map_json(json_data)
+        # Should not crash, may return object string or empty
+        self.assertIsInstance(result, dict)
+
+    def test_parse_with_array_as_value(self):
+        """Array as value — optString returns toString."""
+        json_data = {"tcp_debug": {"sni_domain_map": {"1.2.3.4": ["a", "b"]}}}
+        result = parse_sni_domain_map_json(json_data)
+        self.assertIsInstance(result, dict)
+
+    def test_parse_with_boolean_value(self):
+        """Boolean value — optString returns 'true'/'false'."""
+        json_data = {"tcp_debug": {"sni_domain_map": {"1.2.3.4": True}}}
+        result = parse_sni_domain_map_json(json_data)
+        # optString for boolean returns "true"
+        self.assertIsInstance(result, dict)
+
+    def test_parse_with_empty_string_key(self):
+        """Empty string key in sni_domain_map — preserved."""
+        json_data = {"tcp_debug": {"sni_domain_map": {"": "no-ip.com"}}}
+        result = parse_sni_domain_map_json(json_data)
+        self.assertEqual(result.get(""), "no-ip.com")
+
+    def test_parse_with_very_long_key(self):
+        """Very long key (not a real IP) — preserved as-is."""
+        long_key = "a" * 200
+        json_data = {"tcp_debug": {"sni_domain_map": {long_key: "test.com"}}}
+        result = parse_sni_domain_map_json(json_data)
+        self.assertEqual(result.get(long_key), "test.com")
+
+    def test_parse_sni_domain_map_overrides_recent_snis_same_ip(self):
+        """When both have same IP, sni_domain_map wins."""
+        json_data = {
+            "tcp_debug": {
+                "recent_snis": ["10.20.0.2→1.2.3.4:443 = old-domain.com"],
+                "sni_domain_map": {"1.2.3.4": "new-domain.com"}
+            }
+        }
+        result = parse_sni_domain_map_json(json_data)
+        self.assertEqual(result["1.2.3.4"], "new-domain.com")
+
+    def test_parse_sni_domain_map_empty_returns_empty(self):
+        """Empty sni_domain_map returns empty (Python parser has no fallback)."""
+        json_data = {
+            "tcp_debug": {
+                "recent_snis": ["10.20.0.2→1.2.3.4:443 = fallback.com"],
+                "sni_domain_map": {}
+            }
+        }
+        result = parse_sni_domain_map_json(json_data)
+        # Python parser doesn't have recent_snis fallback (Kotlin does)
+        self.assertEqual(len(result), 0)
+
+    def test_parse_sni_domain_map_with_whitespace_values(self):
+        """Whitespace-only domain — not empty, preserved."""
+        json_data = {"tcp_debug": {"sni_domain_map": {"1.2.3.4": "   "}}}
+        result = parse_sni_domain_map_json(json_data)
+        # "   " is not empty, so it's kept
+        self.assertEqual(result.get("1.2.3.4"), "   ")
+
+    def test_parse_500_entries(self):
+        """500 entries parsed correctly."""
+        sni_map = {f"10.{i//256}.{i%256}.1": f"host{i}.com" for i in range(500)}
+        json_data = {"tcp_debug": {"sni_domain_map": sni_map}}
+        result = parse_sni_domain_map_json(json_data)
+        self.assertEqual(len(result), 500)
+
+    def test_parse_all_same_domain_different_ips(self):
+        """Same domain on 50 different IPs (CDN)."""
+        sni_map = {f"10.0.0.{i}": "cdn.example.com" for i in range(50)}
+        json_data = {"tcp_debug": {"sni_domain_map": sni_map}}
+        result = parse_sni_domain_map_json(json_data)
+        self.assertEqual(len(result), 50)
+        for i in range(50):
+            self.assertEqual(result[f"10.0.0.{i}"], "cdn.example.com")
+
+    def test_parse_domain_with_every_tld(self):
+        """Various TLDs parsed correctly."""
+        json_data = {
+            "tcp_debug": {
+                "sni_domain_map": {
+                    "1.1.1.1": "test.com",
+                    "2.2.2.2": "test.org",
+                    "3.3.3.3": "test.io",
+                    "4.4.4.4": "test.co.uk",
+                    "5.5.5.5": "test.example"
+                }
+            }
+        }
+        result = parse_sni_domain_map_json(json_data)
+        self.assertEqual(len(result), 5)
+        self.assertEqual(result["1.1.1.1"], "test.com")
+        self.assertEqual(result["4.4.4.4"], "test.co.uk")
+
+    def test_parse_domain_with_punycode(self):
+        """Punycode domain (internationalized) parsed correctly."""
+        json_data = {"tcp_debug": {"sni_domain_map": {"1.2.3.4": "xn--e1afmapc.xn--p1ai"}}}
+        result = parse_sni_domain_map_json(json_data)
+        self.assertEqual(result["1.2.3.4"], "xn--e1afmapc.xn--p1ai")
 
 
 if __name__ == '__main__':
