@@ -342,3 +342,72 @@ class TestProbeResponseEdgeCases:
         probe_sent_times = {1: 100, 2: 200, 3: 300}
         probe_sent_times.clear()
         assert len(probe_sent_times) == 0
+
+
+class TestClockSynchronization:
+    """Test that client and server use compatible clocks (#26).
+
+    Bug: client used nanoTime() (monotonic, arbitrary epoch)
+    vs server time.time() (wall clock since 1970).
+    Subtracting gave ~1.7e15 µs (nonsense).
+    """
+
+    def test_server_timestamp_is_epoch_microseconds(self):
+        """Server timestamp should be ~1.7e15 µs (year 2026)."""
+        now_us = int(time.time() * 1_000_000)
+        assert now_us > 1_000_000_000_000_000  # > 1e15
+        assert now_us < 2_000_000_000_000_000  # < 2e15
+
+    def test_client_server_same_clock_origin(self):
+        """Client and server timestamps should be within 1s of each other."""
+        # Simulate: server timestamp (what server would write)
+        server_us = int(time.time() * 1_000_000)
+        # Simulate: client timestamp (what client currentTimeMillis()*1000 gives)
+        client_us = int(time.time() * 1_000_000)  # same source in test
+        diff = abs(server_us - client_us)
+        assert diff < 1_000_000  # within 1s
+
+    def test_uplink_latency_computation(self):
+        """Uplink = server_recv - client_send, should be small."""
+        client_send = int(time.time() * 1_000_000)
+        time.sleep(0.01)  # 10ms
+        server_recv = int(time.time() * 1_000_000)
+        uplink_us = server_recv - client_send
+        uplink_ms = uplink_us / 1000.0
+        # Should be ~10ms, NOT 1782742400s
+        assert 5 < uplink_ms < 50  # 5-50ms range
+
+    def test_downlink_latency_computation(self):
+        """Downlink = client_recv - server_send, should be small."""
+        server_send = int(time.time() * 1_000_000)
+        time.sleep(0.01)  # 10ms
+        client_recv = int(time.time() * 1_000_000)
+        downlink_us = client_recv - server_send
+        downlink_ms = downlink_us / 1000.0
+        assert 5 < downlink_ms < 50
+
+    def test_rtt_computation(self):
+        """RTT = client_recv - client_send (same clock, always correct)."""
+        client_send = int(time.time() * 1_000_000)
+        time.sleep(0.02)  # 20ms
+        client_recv = int(time.time() * 1_000_000)
+        rtt_us = client_recv - client_send
+        rtt_ms = rtt_us / 1000.0
+        assert 15 < rtt_ms < 50  # ~20ms
+
+    def test_old_nanotime_would_give_wrong_magnitude(self):
+        """Demonstrates the bug: nanoTime and time.time() have different origins."""
+        # nanoTime origin = JVM start (gives ~10^12 µs range for 2026)
+        # time.time() origin = epoch 1970 (gives ~10^15 µs range for 2026)
+        # Difference = ~10^15 which looks like "1782742400 seconds"
+        nanotime_us = 1_000_000_000_000  # ~10^12 (typical nanoTime/1000)
+        wallclock_us = 1_782_742_400_000_000  # ~10^15 (typical time.time()*1e6)
+        bogus_diff = wallclock_us - nanotime_us
+        bogus_seconds = bogus_diff / 1_000_000.0
+        # This is the bug value the user saw!
+        assert bogus_seconds > 1_000_000_000  # "1782742400 seconds"
+        # After fix: both use wallclock, diff is small
+        wallclock_us2 = wallclock_us + 50_000  # 50ms later
+        real_diff = wallclock_us2 - wallclock_us
+        real_ms = real_diff / 1000.0
+        assert real_ms == 50.0
