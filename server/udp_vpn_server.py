@@ -32,6 +32,13 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import ipaddress
 import select
 
+# QUIC SNI extraction
+try:
+    from quic_sni import extract_quic_sni, is_quic_initial
+    QUIC_SNI_AVAILABLE = True
+except ImportError:
+    QUIC_SNI_AVAILABLE = False
+
 # ── Constants ──────────────────────────────────────────────────────────────
 
 __version__ = "3.8.0"
@@ -664,6 +671,10 @@ class UdpVpnServer:
         if proto == 6:  # TCP
             self._track_tcp_flow(data, assigned_ip, dst_ip)
 
+        # Track QUIC SNI for UDP port 443
+        if proto == 17 and QUIC_SNI_AVAILABLE and dst_port == 443:
+            self._track_quic_sni(data, assigned_ip, dst_ip)
+
         try:
             os.write(self.tun_fd, data)
         except OSError as e:
@@ -770,6 +781,41 @@ class UdpVpnServer:
         # Mark established on SYN-ACK (from server) or ACK after SYN
         if tcp_flags & 0x10:  # ACK
             flow["established"] = True
+
+    # QUIC SNI tracking (UDP port 443)
+    _quic_sni_cache = {}  # dst_ip -> domain (dedup, avoid re-parsing)
+
+    def _track_quic_sni(self, data: bytes, client_ip: str, dst_ip: str):
+        """Extract SNI from QUIC Initial packets (UDP :443)."""
+        # Skip if already know this IP's domain
+        if dst_ip in self._quic_sni_cache:
+            return
+
+        # IP header offset
+        ihl = (data[0] & 0x0F) * 4 if len(data) >= 20 else 0
+        # UDP header is 8 bytes after IP header
+        udp_payload_start = ihl + 8
+        if len(data) <= udp_payload_start:
+            return
+
+        udp_payload = data[udp_payload_start:]
+        if not is_quic_initial(udp_payload):
+            return
+
+        sni = extract_quic_sni(udp_payload)
+        if sni:
+            self._quic_sni_cache[dst_ip] = sni
+            # Add to tcp_tracker so it appears in sni_domain_map
+            if client_ip not in self._tcp_tracker:
+                self._tcp_tracker[client_ip] = {}
+            flow_key = f"{dst_ip}:443"
+            self._tcp_tracker[client_ip][flow_key] = {
+                "syn": 0, "established": True, "tls_hello": 1, "sni": sni
+            }
+            self._tls_sni_log.append(f"{client_ip}→{dst_ip}:443 = {sni}")
+            if len(self._tls_sni_log) > 50:
+                self._tls_sni_log.pop(0)
+            log(f"  [QUIC] {client_ip}→{dst_ip}:443 SNI={sni}")
 
     def _extract_sni_from_payload(self, data: bytes, ch_offset: int) -> str:
         """Extract SNI from TLS ClientHello at given offset."""
