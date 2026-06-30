@@ -827,4 +827,152 @@ class ServerSniFallbackTest {
         val ipTcpHeader = basePacket.copyOf(40) // IP(20) + TCP(20)
         return ipTcpHeader + tlsRecord
     }
+
+    // ============================================================
+    // Edge Cases: sni_domain_map JSON parsing (mirrors ApiClient)
+    // ============================================================
+
+    private fun parseSniDomainMapJson(json: org.json.JSONObject): Map<String, String> {
+        val tcpDebug = json.optJSONObject("tcp_debug") ?: return emptyMap()
+        val sniDomainMap = tcpDebug.optJSONObject("sni_domain_map")
+        if (sniDomainMap != null) {
+            val domainMap = mutableMapOf<String, String>()
+            for (key in sniDomainMap.keys()) {
+                val domain = sniDomainMap.optString(key, "")
+                if (domain.isNotEmpty()) {
+                    domainMap[key] = domain.lowercase()
+                }
+            }
+            if (domainMap.isNotEmpty()) return domainMap
+        }
+        // Fallback: parse recent_snis
+        val recentSnis = tcpDebug.optJSONArray("recent_snis") ?: return emptyMap()
+        val domainMap = mutableMapOf<String, String>()
+        for (i in 0 until recentSnis.length()) {
+            val entry = recentSnis.getString(i)
+            val arrowIdx = entry.indexOf('→')
+            val equalsIdx = entry.indexOf('=')
+            if (arrowIdx >= 0 && equalsIdx > arrowIdx) {
+                val remotePart = entry.substring(arrowIdx + 1, equalsIdx).trim()
+                val domain = entry.substring(equalsIdx + 1).trim().lowercase()
+                val colonIdx = remotePart.indexOf(':')
+                val remoteIp = if (colonIdx > 0) remotePart.substring(0, colonIdx) else remotePart
+                if (domain.isNotEmpty()) {
+                    domainMap[remoteIp] = domain
+                }
+            }
+        }
+        return domainMap
+    }
+
+    @Test
+    fun `sni_domain_map parsed as JSON object`() {
+        val json = org.json.JSONObject("""
+            {"tcp_debug":{"sni_domain_map":{
+                "142.251.10.95":"google.com",
+                "157.240.1.35":"facebook.com"
+            }}}
+        """)
+        val result = parseSniDomainMapJson(json)
+        assertEquals(2, result.size)
+        assertEquals("google.com", result["142.251.10.95"])
+        assertEquals("facebook.com", result["157.240.1.35"])
+    }
+
+    @Test
+    fun `sni_domain_map empty returns empty`() {
+        val json = org.json.JSONObject("""{"tcp_debug":{"sni_domain_map":{}}}""")
+        val result = parseSniDomainMapJson(json)
+        assertTrue(result.isEmpty())
+    }
+
+    @Test
+    fun `sni_domain_map missing falls back to recent_snis`() {
+        val json = org.json.JSONObject("""
+            {"tcp_debug":{"recent_snis":["10.20.0.2→1.2.3.4:443 = fallback.com"]}}
+        """)
+        val result = parseSniDomainMapJson(json)
+        assertEquals("fallback.com", result["1.2.3.4"])
+    }
+
+    @Test
+    fun `sni_domain_map missing tcp_debug returns empty`() {
+        val json = org.json.JSONObject("{}")
+        val result = parseSniDomainMapJson(json)
+        assertTrue(result.isEmpty())
+    }
+
+    @Test
+    fun `sni_domain_map domain lowercased`() {
+        val json = org.json.JSONObject("""
+            {"tcp_debug":{"sni_domain_map":{"1.2.3.4":"EXAMPLE.COM"}}}
+        """)
+        val result = parseSniDomainMapJson(json)
+        assertEquals("example.com", result["1.2.3.4"])
+    }
+
+    @Test
+    fun `sni_domain_map empty domain skipped`() {
+        val json = org.json.JSONObject("""
+            {"tcp_debug":{"sni_domain_map":{"1.2.3.4":"valid.com","5.6.7.8":""}}}
+        """)
+        val result = parseSniDomainMapJson(json)
+        assertEquals(1, result.size)
+        assertEquals("valid.com", result["1.2.3.4"])
+    }
+
+    @Test
+    fun `sni_domain_map preferred over recent_snis`() {
+        val json = org.json.JSONObject("""
+            {"tcp_debug":{
+                "recent_snis":["10.20.0.2→1.2.3.4:443 = old.com"],
+                "sni_domain_map":{"1.2.3.4":"new.com"}
+            }}
+        """)
+        val result = parseSniDomainMapJson(json)
+        // sni_domain_map takes priority
+        assertEquals("new.com", result["1.2.3.4"])
+    }
+
+    @Test
+    fun `sni_domain_map with 100 entries`() {
+        val mapJson = (1..100).joinToString(",") { i ->
+            "\"10.0.${i / 256}.${i % 256}\":\"domain$i.com\""
+        }
+        val json = org.json.JSONObject("""{"tcp_debug":{"sni_domain_map":{$mapJson}}}""")
+        val result = parseSniDomainMapJson(json)
+        assertEquals(100, result.size)
+        assertEquals("domain1.com", result["10.0.0.1"])
+    }
+
+    @Test
+    fun `sni_domain_map with real API response structure`() {
+        val json = org.json.JSONObject("""
+            {"rx_bytes":12345,"tx_bytes":67890,"tcp_debug":{
+                "tcp_flows":521,"tls_handshakes":339,"sni_domains":235,
+                "recent_snis":["10.20.0.75→35.186.224.28:443 = gew4-spclient.spotify.com"],
+                "sni_domain_map":{
+                    "35.186.224.28":"gew4-spclient.spotify.com",
+                    "74.125.68.95":"pubsub.googleapis.com"
+                }
+            }}
+        """)
+        val result = parseSniDomainMapJson(json)
+        assertEquals(2, result.size)
+        assertEquals("gew4-spclient.spotify.com", result["35.186.224.28"])
+        assertEquals("pubsub.googleapis.com", result["74.125.68.95"])
+    }
+
+    @Test
+    fun `sni_domain_map with hyphens and numbers in domain`() {
+        val json = org.json.JSONObject("""
+            {"tcp_debug":{"sni_domain_map":{
+                "1.2.3.4":"my-app-v2.example-site.com",
+                "5.6.7.8":"api123.internal.corp"
+            }}}
+        """)
+        val result = parseSniDomainMapJson(json)
+        assertEquals("my-app-v2.example-site.com", result["1.2.3.4"])
+        assertEquals("api123.internal.corp", result["5.6.7.8"])
+    }
 }
