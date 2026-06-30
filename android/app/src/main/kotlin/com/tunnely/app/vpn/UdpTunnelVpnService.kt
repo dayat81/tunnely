@@ -154,6 +154,7 @@ class UdpTunnelVpnService : VpnService() {
         RemoteLogger.i(TAG, "🔴 doConnect() started")
         _vpnState.value = VpnState.CONNECTING
         _connectionHealth.value = ConnectionHealth()
+        PacketFlowTracker.clear()
         running = true
         totalRx = 0
         totalTx = 0
@@ -446,6 +447,7 @@ class UdpTunnelVpnService : VpnService() {
         _vpnState.value = VpnState.DISCONNECTED
         _trafficStats.value = TrafficStats()
         _connectionHealth.value = ConnectionHealth()
+        PacketFlowTracker.clear()
         updateNotification("Disconnected")
 
         stopForeground(STOP_FOREGROUND_REMOVE)
