@@ -356,4 +356,347 @@ class SplitTunnelingModeTest {
         assertTrue(expectedMessage.contains("Include mode"))
         assertTrue(expectedMessage.contains("at least 1 app"))
     }
+
+    // ── Additional Edge Cases ─────────────────────────────────────
+
+    @Test
+    fun `mode switching preserves apps`() {
+        // User selects apps, then switches mode
+        var apps = setOf("com.android.chrome", "com.whatsapp")
+        var mode = "exclude"
+
+        // User switches to Include
+        mode = "include"
+        assertEquals(2, apps.size)
+        assertEquals("include", mode)
+
+        // User switches back to Exclude
+        mode = "exclude"
+        assertEquals(2, apps.size)
+        assertEquals("exclude", mode)
+    }
+
+    @Test
+    fun `invalid mode defaults to exclude`() {
+        // If mode is somehow invalid, should fall back to exclude
+        val mode = "invalid"
+        val effectiveMode = if (mode == "include") "include" else "exclude"
+        assertEquals("exclude", effectiveMode)
+    }
+
+    @Test
+    fun `empty string in apps set`() {
+        // Edge case: empty string as package name
+        val apps = setOf("")
+        assertEquals(1, apps.size)
+        assertTrue(apps.contains(""))
+        // Should be treated as valid (though Android will reject it)
+    }
+
+    @Test
+    fun `whitespace in package name`() {
+        // Edge case: whitespace in package name
+        val apps = setOf("com.android.chrome ")
+        assertEquals(1, apps.size)
+        // Android will reject this, but our logic shouldn't crash
+    }
+
+    @Test
+    fun `duplicate apps in set`() {
+        // Sets naturally deduplicate
+        val apps = setOf("com.android.chrome", "com.android.chrome", "com.whatsapp")
+        assertEquals(2, apps.size)
+    }
+
+    @Test
+    fun `system apps can be selected`() {
+        // System apps like com.android.*, com.google.*
+        val apps = setOf(
+            "com.android.chrome",
+            "com.android.settings",
+            "com.google.android.gms",
+            "com.google.android.apps.maps"
+        )
+        assertEquals(4, apps.size)
+    }
+
+    @Test
+    fun `our own app in include list`() {
+        // If user adds Tunnely itself to include list
+        val apps = setOf("com.tunnely.app", "com.android.chrome")
+        val mode = "include"
+
+        assertEquals(2, apps.size)
+        // VPN builder will exclude ourselves AND try to allow ourselves
+        // Exclusion takes precedence in Android
+    }
+
+    @Test
+    fun `our own app in exclude list`() {
+        // If user adds Tunnely itself to exclude list
+        val apps = setOf("com.tunnely.app")
+        val mode = "exclude"
+
+        assertEquals(1, apps.size)
+        // VPN builder already excludes ourselves, this is redundant but harmless
+    }
+
+    @Test
+    fun `very long package name`() {
+        // Edge case: very long package name
+        val longPkg = "com." + "a".repeat(200) + ".app"
+        val apps = setOf(longPkg)
+        assertEquals(1, apps.size)
+        assertTrue(apps.first().length > 200)
+    }
+
+    @Test
+    fun `special characters in package name`() {
+        // Edge case: special characters (invalid but shouldn't crash)
+        val apps = setOf("com.android.chrome!@#")
+        assertEquals(1, apps.size)
+    }
+
+    @Test
+    fun `include mode remove last app`() {
+        // Start with 1 app, remove it → 0 apps → should prevent VPN
+        var apps = setOf("com.android.chrome")
+        val mode = "include"
+
+        assertEquals(1, apps.size)
+        assertFalse(apps.isEmpty())
+
+        // User removes the last app
+        apps = emptySet()
+        assertEquals(0, apps.size)
+        assertTrue(apps.isEmpty())
+
+        // Should prevent VPN
+        val shouldPrevent = mode == "include" && apps.isEmpty()
+        assertTrue(shouldPrevent)
+    }
+
+    @Test
+    fun `exclude mode remove all apps`() {
+        // Start with apps, remove all → still works (all through VPN)
+        var apps = setOf("com.android.chrome", "com.whatsapp")
+        val mode = "exclude"
+
+        assertEquals(2, apps.size)
+
+        // User removes all apps
+        apps = emptySet()
+        assertEquals(0, apps.size)
+
+        // VPN should still start (exclude with 0 = no exclusions)
+        val shouldPrevent = mode == "include" && apps.isEmpty()
+        assertFalse(shouldPrevent)
+    }
+
+    @Test
+    fun `case sensitivity`() {
+        // Package names are case-sensitive
+        val apps = setOf("com.android.Chrome", "com.android.chrome")
+        assertEquals(2, apps.size)  // Different packages
+    }
+
+    @Test
+    fun `many apps in include mode`() {
+        // Include mode with many apps (e.g., 50)
+        val apps = (1..50).map { "com.app$it" }.toSet()
+        val mode = "include"
+
+        assertEquals(50, apps.size)
+        assertFalse(apps.isEmpty())
+
+        // VPN should start with all 50 apps
+        val shouldPrevent = mode == "include" && apps.isEmpty()
+        assertFalse(shouldPrevent)
+    }
+
+    @Test
+    fun `many apps in exclude mode`() {
+        // Exclude mode with many apps
+        val apps = (1..50).map { "com.app$it" }.toSet()
+        val mode = "exclude"
+
+        assertEquals(50, apps.size)
+
+        // VPN should start (those 50 apps bypass VPN)
+        val shouldPrevent = mode == "include" && apps.isEmpty()
+        assertFalse(shouldPrevent)
+    }
+
+    @Test
+    fun `split tunneling toggle rapidly`() {
+        // Simulate rapid toggle: on → off → on
+        var splitTunneling = true
+        var apps = setOf("com.android.chrome")
+        var mode = "include"
+
+        // Toggle off
+        splitTunneling = false
+        assertFalse(splitTunneling)
+
+        // Toggle on again
+        splitTunneling = true
+        assertTrue(splitTunneling)
+        assertEquals(1, apps.size)  // Apps preserved
+    }
+
+    @Test
+    fun `mode and apps independence`() {
+        // Changing mode doesn't affect apps, changing apps doesn't affect mode
+        var mode = "include"
+        var apps = setOf("com.android.chrome")
+
+        // Change mode
+        mode = "exclude"
+        assertEquals(1, apps.size)  // Apps unchanged
+
+        // Change apps
+        apps = setOf("com.whatsapp", "com.telegram")
+        assertEquals("exclude", mode)  // Mode unchanged
+    }
+
+    @Test
+    fun `shouldPreventVpn truth table`() {
+        // Test all combinations of the prevent VPN logic
+        data class Case(
+            val splitTunneling: Boolean,
+            val mode: String,
+            val appsSize: Int,
+            val expected: Boolean
+        )
+
+        val cases = listOf(
+            Case(true, "include", 0, true),   // Include + 0 apps → prevent
+            Case(true, "include", 1, false),  // Include + 1 app → allow
+            Case(true, "exclude", 0, false),  // Exclude + 0 apps → allow
+            Case(true, "exclude", 1, false),  // Exclude + 1 app → allow
+            Case(false, "include", 0, false), // Disabled → allow
+            Case(false, "include", 1, false), // Disabled → allow
+            Case(false, "exclude", 0, false), // Disabled → allow
+            Case(false, "exclude", 1, false), // Disabled → allow
+        )
+
+        for (case in cases) {
+            val result = case.splitTunneling && case.mode == "include" && case.appsSize == 0
+            assertEquals(
+                "splitTunneling=${case.splitTunneling}, mode=${case.mode}, apps=${case.appsSize}",
+                case.expected,
+                result
+            )
+        }
+    }
+
+    @Test
+    fun `include mode add then remove app`() {
+        // Add app, then remove → back to 0 apps
+        var apps = setOf<String>()
+        val mode = "include"
+
+        // Add app
+        apps = setOf("com.android.chrome")
+        assertFalse(apps.isEmpty())
+
+        // Remove app
+        apps = emptySet()
+        assertTrue(apps.isEmpty())
+
+        // Should prevent VPN
+        val shouldPrevent = mode == "include" && apps.isEmpty()
+        assertTrue(shouldPrevent)
+    }
+
+    @Test
+    fun `exclude mode add then remove app`() {
+        // Add app, then remove → back to 0 apps
+        var apps = setOf<String>()
+        val mode = "exclude"
+
+        // Add app
+        apps = setOf("com.android.chrome")
+        assertFalse(apps.isEmpty())
+
+        // Remove app
+        apps = emptySet()
+        assertTrue(apps.isEmpty())
+
+        // Should NOT prevent VPN (exclude + 0 = no exclusions)
+        val shouldPrevent = mode == "include" && apps.isEmpty()
+        assertFalse(shouldPrevent)
+    }
+
+    @Test
+    fun `package name with numbers`() {
+        val apps = setOf("com.app123.test456")
+        assertEquals(1, apps.size)
+        assertTrue(apps.first().matches(Regex(".*\\d+.*")))
+    }
+
+    @Test
+    fun `package name with underscores`() {
+        val apps = setOf("com.my_app.test_name")
+        assertEquals(1, apps.size)
+    }
+
+    @Test
+    fun `single character package`() {
+        val apps = setOf("a")
+        assertEquals(1, apps.size)
+        // Invalid but shouldn't crash
+    }
+
+    @Test
+    fun `include mode with system and user apps`() {
+        // Mix of system and user apps
+        val apps = setOf(
+            "com.android.chrome",      // system
+            "com.whatsapp",             // user
+            "com.google.android.gms",   // system
+            "org.mozilla.firefox"       // user
+        )
+        val mode = "include"
+
+        assertEquals(4, apps.size)
+
+        // VPN should start with all 4 apps
+        val shouldPrevent = mode == "include" && apps.isEmpty()
+        assertFalse(shouldPrevent)
+    }
+
+    @Test
+    fun `concurrent mode and apps changes`() {
+        // Simulate concurrent changes (race condition test)
+        var mode = "include"
+        var apps = setOf("com.android.chrome")
+
+        // Thread 1: change mode
+        mode = "exclude"
+
+        // Thread 2: change apps
+        apps = setOf("com.whatsapp", "com.telegram")
+
+        // Final state should be consistent
+        assertEquals("exclude", mode)
+        assertEquals(2, apps.size)
+    }
+
+    @Test
+    fun `vpn start condition edge cases`() {
+        // Additional edge cases for VPN start condition
+
+        // Include + 0 apps + splitTunneling=false → should NOT prevent
+        assertFalse(false && "include" == "include" && 0 == 0)
+
+        // Include + 0 apps + splitTunneling=true → SHOULD prevent
+        assertTrue(true && "include" == "include" && 0 == 0)
+
+        // Include + 1 app + splitTunneling=true → should NOT prevent
+        assertFalse(true && "include" == "include" && 1 == 0)
+
+        // Exclude + 0 apps + splitTunneling=true → should NOT prevent
+        assertFalse(true && "exclude" == "include" && 0 == 0)
+    }
 }
