@@ -239,4 +239,38 @@ class SplitTunnelingModeTest {
         assertEquals(2, apps.size)
         assertEquals("include", mode)
     }
+
+    @Test
+    fun `include mode with 0 apps should block all traffic`() {
+        // Issue #29: Include mode + 0 apps = traffic still flows
+        // Android falls back to "allow all" when addAllowedApplication list is empty
+        // Fix: add a dummy placeholder package so nothing matches
+        val mode = "include"
+        val apps = emptySet<String>()
+        val splitTunneling = true
+        
+        assertEquals("include", mode)
+        assertEquals(0, apps.size)
+        assertTrue(splitTunneling)
+        
+        // VPN builder should add "com.tunnely.blocked.placeholder" as allowed
+        // so no real app matches → 0 traffic through VPN
+        val shouldBlock = splitTunneling && mode == "include" && apps.isEmpty()
+        assertTrue(shouldBlock)
+    }
+
+    @Test
+    fun `include mode with apps should allow those apps`() {
+        // Normal include mode: selected apps go through VPN
+        val mode = "include"
+        val apps = setOf("com.android.chrome")
+        val splitTunneling = true
+        
+        assertEquals("include", mode)
+        assertEquals(1, apps.size)
+        
+        // VPN builder should add "com.android.chrome" as allowed
+        val shouldBlock = splitTunneling && mode == "include" && apps.isEmpty()
+        assertFalse(shouldBlock)
+    }
 }

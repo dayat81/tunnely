@@ -229,7 +229,7 @@ class UdpTunnelVpnService : VpnService() {
                 .addDnsServer("1.1.1.1")
 
             // Split tunneling
-            if (prefs.splitTunneling && prefs.splitApps.isNotEmpty()) {
+            if (prefs.splitTunneling) {
                 // Always exclude ourselves to prevent routing loop
                 try {
                     builder.addDisallowedApplication(packageName)
@@ -240,17 +240,25 @@ class UdpTunnelVpnService : VpnService() {
                 RemoteLogger.i(TAG, "  Split apps: ${prefs.splitApps}")
                 
                 if (mode == "include") {
-                    // INCLUDE mode: only selected apps go through VPN
-                    // Uses addAllowedApplication — may have TCP issues on some devices
-                    for (pkg in prefs.splitApps) {
+                    if (prefs.splitApps.isEmpty()) {
+                        // Include mode with 0 apps = block all traffic
+                        // Add a non-existent package so nothing matches
                         try {
-                            builder.addAllowedApplication(pkg)
-                            RemoteLogger.i(TAG, "  ✅ Allowed: $pkg")
-                        } catch (e: Exception) {
-                            RemoteLogger.w(TAG, "  ❌ Failed to include $pkg: ${e.message}")
+                            builder.addAllowedApplication("com.tunnely.blocked.placeholder")
+                            RemoteLogger.i(TAG, "  Split tunneling [include]: 0 apps → blocking all traffic")
+                        } catch (_: Exception) {}
+                    } else {
+                        // INCLUDE mode: only selected apps go through VPN
+                        for (pkg in prefs.splitApps) {
+                            try {
+                                builder.addAllowedApplication(pkg)
+                                RemoteLogger.i(TAG, "  ✅ Allowed: $pkg")
+                            } catch (e: Exception) {
+                                RemoteLogger.w(TAG, "  ❌ Failed to include $pkg: ${e.message}")
+                            }
                         }
+                        RemoteLogger.i(TAG, "  Split tunneling [include]: ${prefs.splitApps.size} apps through VPN")
                     }
-                    RemoteLogger.i(TAG, "  Split tunneling [include]: ${prefs.splitApps.size} apps through VPN")
                 } else {
                     // EXCLUDE mode (default): selected apps bypass VPN, all else through VPN
                     // Uses addDisallowedApplication — more reliable for TCP
@@ -265,7 +273,7 @@ class UdpTunnelVpnService : VpnService() {
                     RemoteLogger.i(TAG, "  Split tunneling [exclude]: ${prefs.splitApps.size} apps bypass VPN")
                 }
             } else {
-                RemoteLogger.i(TAG, "  Split tunneling disabled or no apps selected (splitTunneling=${prefs.splitTunneling}, apps=${prefs.splitApps.size})")
+                RemoteLogger.i(TAG, "  Split tunneling disabled (splitTunneling=${prefs.splitTunneling})")
             }
 
             builder.setConfigureIntent(
