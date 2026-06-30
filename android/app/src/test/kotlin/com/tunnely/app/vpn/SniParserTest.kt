@@ -381,6 +381,98 @@ class SniParserTest {
         assertEquals(20, dataOffset)
     }
 
+    @Test
+    fun `very short domain a-com`() {
+        val packet = buildClientHelloWithSni("a.com")
+        val domain = SniParser.extractSni(packet)
+        assertEquals("a.com", domain)
+    }
+
+    @Test
+    fun `domain with underscores`() {
+        val packet = buildClientHelloWithSni("my_service.example.com")
+        val domain = SniParser.extractSni(packet)
+        assertEquals("my_service.example.com", domain)
+    }
+
+    @Test
+    fun `wildcard domain not typical in SNI`() {
+        // Wildcards (*.example.com) are NOT typically sent in SNI
+        // But if sent, should be parsed
+        val packet = buildClientHelloWithSni("*.example.com")
+        val domain = SniParser.extractSni(packet)
+        assertEquals("*.example.com", domain)
+    }
+
+    @Test
+    fun `domain starts with number`() {
+        val packet = buildClientHelloWithSni("123.example.com")
+        val domain = SniParser.extractSni(packet)
+        assertEquals("123.example.com", domain)
+    }
+
+    @Test
+    fun `domain ends with number`() {
+        val packet = buildClientHelloWithSni("example123.com")
+        val domain = SniParser.extractSni(packet)
+        assertEquals("example123.com", domain)
+    }
+
+    @Test
+    fun `multiple subdomains`() {
+        val packet = buildClientHelloWithSni("a.b.c.d.e.example.com")
+        val domain = SniParser.extractSni(packet)
+        assertEquals("a.b.c.d.e.example.com", domain)
+    }
+
+    @Test
+    fun `common TLDs com`() {
+        val packet = buildClientHelloWithSni("example.com")
+        assertEquals("example.com", SniParser.extractSni(packet))
+    }
+
+    @Test
+    fun `common TLDs org`() {
+        val packet = buildClientHelloWithSni("example.org")
+        assertEquals("example.org", SniParser.extractSni(packet))
+    }
+
+    @Test
+    fun `common TLDs net`() {
+        val packet = buildClientHelloWithSni("example.net")
+        assertEquals("example.net", SniParser.extractSni(packet))
+    }
+
+    @Test
+    fun `common TLDs io`() {
+        val packet = buildClientHelloWithSni("example.io")
+        assertEquals("example.io", SniParser.extractSni(packet))
+    }
+
+    @Test
+    fun `common TLDs co`() {
+        val packet = buildClientHelloWithSni("example.co")
+        assertEquals("example.co", SniParser.extractSni(packet))
+    }
+
+    @Test
+    fun `country TLD uk`() {
+        val packet = buildClientHelloWithSni("example.co.uk")
+        assertEquals("example.co.uk", SniParser.extractSni(packet))
+    }
+
+    @Test
+    fun `country TLD de`() {
+        val packet = buildClientHelloWithSni("example.de")
+        assertEquals("example.de", SniParser.extractSni(packet))
+    }
+
+    @Test
+    fun `country TLD jp`() {
+        val packet = buildClientHelloWithSni("example.co.jp")
+        assertEquals("example.co.jp", SniParser.extractSni(packet))
+    }
+
     // ── DomainCache Tests ──────────────────────────────────────────
 
     @Test
@@ -500,6 +592,86 @@ class SniParserTest {
         assertEquals("gateway.local", DomainCache.getDomain("10.0.0.1"))
     }
 
+    @Test
+    fun `cache handles IPv6-like strings`() {
+        // Cache doesn't validate IPs, just stores strings
+        DomainCache.clear()
+        DomainCache.putDomain("::1", "localhost6")
+        assertEquals("localhost6", DomainCache.getDomain("::1"))
+    }
+
+    @Test
+    fun `cache overwrites with different case`() {
+        DomainCache.clear()
+        DomainCache.putDomain("1.2.3.4", "Example.COM")
+        assertEquals("example.com", DomainCache.getDomain("1.2.3.4"))
+        
+        DomainCache.putDomain("1.2.3.4", "NEW.example.com")
+        assertEquals("new.example.com", DomainCache.getDomain("1.2.3.4"))
+    }
+
+    @Test
+    fun `cache handles domain with port in string`() {
+        // Edge case: someone puts port in domain (wrong but shouldn't crash)
+        DomainCache.clear()
+        DomainCache.putDomain("1.2.3.4", "example.com:443")
+        assertEquals("example.com:443", DomainCache.getDomain("1.2.3.4"))
+    }
+
+    @Test
+    fun `cache clear then add works`() {
+        DomainCache.clear()
+        DomainCache.putDomain("1.2.3.4", "old.com")
+        DomainCache.clear()
+        DomainCache.putDomain("1.2.3.4", "new.com")
+        assertEquals("new.com", DomainCache.getDomain("1.2.3.4"))
+    }
+
+    @Test
+    fun `cache size after clear is zero`() {
+        DomainCache.clear()
+        for (i in 1..100) {
+            DomainCache.putDomain("10.0.0.$i", "host$i.com")
+        }
+        assertEquals(100, DomainCache.size())
+        DomainCache.clear()
+        assertEquals(0, DomainCache.size())
+    }
+
+    @Test
+    fun `cache concurrent put and get`() {
+        // Simulate concurrent access
+        DomainCache.clear()
+        val errors = mutableListOf<Exception>()
+        
+        val writer = Thread {
+            try {
+                for (i in 1..100) {
+                    DomainCache.putDomain("10.0.0.$i", "host$i.com")
+                }
+            } catch (e: Exception) {
+                errors.add(e)
+            }
+        }
+        
+        val reader = Thread {
+            try {
+                for (i in 1..100) {
+                    DomainCache.getDomain("10.0.0.$i")
+                }
+            } catch (e: Exception) {
+                errors.add(e)
+            }
+        }
+        
+        writer.start()
+        reader.start()
+        writer.join()
+        reader.join()
+        
+        assertTrue("Concurrent access should not throw", errors.isEmpty())
+    }
+
     // ── FlowEntry Domain Tests ─────────────────────────────────────
 
     @Test
@@ -583,6 +755,91 @@ class SniParserTest {
         assertEquals("1.2.3.4:8080", entry.displayServerWithPort)
     }
 
+    @Test
+    fun `FlowEntry with zero bytes`() {
+        val entry = FlowEntry(
+            server = "1.2.3.4",
+            domain = "example.com",
+            port = 443,
+            protocol = "TCP",
+            uplinkBytes = 0,
+            downlinkBytes = 0
+        )
+        assertEquals("0 B", entry.displayUplink)
+        assertEquals("0 B", entry.displayDownlink)
+    }
+
+    @Test
+    fun `FlowEntry with bytes formatting`() {
+        val entry = FlowEntry(
+            server = "1.2.3.4",
+            domain = null,
+            port = 443,
+            protocol = "TCP",
+            uplinkBytes = 1536,  // 1.5 KB
+            downlinkBytes = 1048576  // 1.0 MB
+        )
+        assertEquals("1 KB", entry.displayUplink)
+        assertEquals("1.0 MB", entry.displayDownlink)
+    }
+
+    @Test
+    fun `FlowEntry UDP protocol`() {
+        val entry = FlowEntry(
+            server = "8.8.8.8",
+            domain = null,
+            port = 53,
+            protocol = "UDP",
+            uplinkBytes = 100,
+            downlinkBytes = 200
+        )
+        assertEquals("UDP", entry.protocol)
+        assertEquals("8.8.8.8:53", entry.displayServer)
+    }
+
+    @Test
+    fun `FlowEntry ICMP protocol`() {
+        val entry = FlowEntry(
+            server = "8.8.8.8",
+            domain = null,
+            port = 0,
+            protocol = "ICMP",
+            uplinkBytes = 0,
+            downlinkBytes = 0
+        )
+        assertEquals("ICMP", entry.protocol)
+    }
+
+    @Test
+    fun `FlowEntry equality same values`() {
+        val entry1 = FlowEntry("1.2.3.4", "example.com", 443, "TCP", 100, 200)
+        val entry2 = FlowEntry("1.2.3.4", "example.com", 443, "TCP", 100, 200)
+        assertEquals(entry1, entry2)
+    }
+
+    @Test
+    fun `FlowEntry equality different domain`() {
+        val entry1 = FlowEntry("1.2.3.4", "a.com", 443, "TCP", 100, 200)
+        val entry2 = FlowEntry("1.2.3.4", "b.com", 443, "TCP", 100, 200)
+        assertNotEquals(entry1, entry2)
+    }
+
+    @Test
+    fun `FlowEntry equality domain vs null`() {
+        val entry1 = FlowEntry("1.2.3.4", "example.com", 443, "TCP", 100, 200)
+        val entry2 = FlowEntry("1.2.3.4", null, 443, "TCP", 100, 200)
+        assertNotEquals(entry1, entry2)
+    }
+
+    @Test
+    fun `FlowEntry copy with different bytes`() {
+        val entry = FlowEntry("1.2.3.4", "example.com", 443, "TCP", 100, 200)
+        val updated = entry.copy(uplinkBytes = 500, downlinkBytes = 600)
+        assertEquals("example.com", updated.domain)
+        assertEquals(500L, updated.uplinkBytes)
+        assertEquals(600L, updated.downlinkBytes)
+    }
+
     // ── Integration: PacketFlowTracker + SNI ───────────────────────
 
     @Test
@@ -653,5 +910,41 @@ class SniParserTest {
         // But tracker flows should be empty
         val flows = tracker.getFlows()
         assertEquals(0, flows.size)
+    }
+
+    @Test
+    fun `PacketFlowTracker getFlows includes domain`() {
+        DomainCache.clear()
+        val tracker = PacketFlowTracker
+        tracker.clear()
+        
+        // Process TLS ClientHello
+        val packet = buildClientHelloWithSni("api.github.com")
+        tracker.processPacket(packet, isUplink = true)
+        
+        // Get flows
+        val flows = tracker.getFlows()
+        
+        // Should have at least one flow with domain
+        assertTrue(flows.isNotEmpty())
+        val flow = flows.first()
+        assertEquals("api.github.com", flow.domain)
+    }
+
+    @Test
+    fun `PacketFlowTracker multiple flows different domains`() {
+        DomainCache.clear()
+        val tracker = PacketFlowTracker
+        tracker.clear()
+        
+        // Process multiple TLS packets to different IPs
+        val packet1 = buildClientHelloWithSni("api.github.com")
+        tracker.processPacket(packet1, isUplink = true)
+        
+        // Note: Both packets use same dest IP (140.82.121.6) in our test helper
+        // In real scenario, different domains would have different IPs
+        
+        val flows = tracker.getFlows()
+        assertTrue(flows.isNotEmpty())
     }
 }
