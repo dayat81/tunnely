@@ -823,22 +823,29 @@ class UdpVpnServer:
             pass
         return None
 
-    def get_tcp_debug_summary(self) -> str:
+    def get_tcp_debug_summary(self) -> dict:
         """Get summary of TCP/TLS flows for HTTP stats."""
         total_tls = 0
         total_sni = 0
         recent_snis = list(self._tls_sni_log[-10:])
+        # Build comprehensive IP→domain map from ALL tracked flows
+        sni_domain_map = {}
         for client_flows in self._tcp_tracker.values():
-            for flow in client_flows.values():
+            for flow_key, flow in client_flows.items():
                 if flow["tls_hello"] > 0:
                     total_tls += 1
                 if flow["sni"]:
                     total_sni += 1
+                    # flow_key = "dst_ip:dst_port" — extract IP
+                    colon_idx = flow_key.rfind(':')
+                    remote_ip = flow_key[:colon_idx] if colon_idx > 0 else flow_key
+                    sni_domain_map[remote_ip] = flow["sni"]
         return {
             "tcp_flows": sum(len(f) for f in self._tcp_tracker.values()),
             "tls_handshakes": total_tls,
             "sni_domains": total_sni,
             "recent_snis": recent_snis,
+            "sni_domain_map": sni_domain_map,
         }
 
     def _forward_dns(self, packet: bytes, orig_dns_ip: str, client_ip: str, client_addr):

@@ -137,7 +137,7 @@ class ApiClient(
     /**
      * Get server-side SNI domain map from /api/vpn/stats.
      * Returns map of "remote_ip" -> "domain" extracted from TLS ClientHello.
-     * Server tracks this in tcp_debug.recent_snis.
+     * Server tracks ALL SNI domains in tcp_debug.sni_domain_map.
      */
     suspend fun getServerSniDomains(): Map<String, String> =
         withContext(Dispatchers.IO) {
@@ -154,6 +154,21 @@ class ApiClient(
 
                 val json = JSONObject(body)
                 val tcpDebug = json.optJSONObject("tcp_debug") ?: return@withContext emptyMap()
+
+                // Try new sni_domain_map first (comprehensive, all IPs)
+                val sniDomainMap = tcpDebug.optJSONObject("sni_domain_map")
+                if (sniDomainMap != null) {
+                    val domainMap = mutableMapOf<String, String>()
+                    for (key in sniDomainMap.keys()) {
+                        val domain = sniDomainMap.optString(key, "")
+                        if (domain.isNotEmpty()) {
+                            domainMap[key] = domain.lowercase()
+                        }
+                    }
+                    if (domainMap.isNotEmpty()) return@withContext domainMap
+                }
+
+                // Fallback: parse recent_snis array (last 10 only)
                 val recentSnis = tcpDebug.optJSONArray("recent_snis") ?: return@withContext emptyMap()
 
                 val domainMap = mutableMapOf<String, String>()
