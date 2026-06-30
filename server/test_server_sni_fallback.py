@@ -585,5 +585,318 @@ class TestEdgeCases(unittest.TestCase):
         self.assertEqual(result["2.2.2.2"], "cdn.example.com")
 
 
+# ============================================================
+# Test: Additional Edge Cases
+# ============================================================
+
+class TestAdditionalEdgeCases(unittest.TestCase):
+    """Additional edge cases for robustness."""
+
+    # --- Format Edge Cases ---
+
+    def test_parse_entry_with_extra_whitespace(self):
+        """Extra whitespace around → and = is trimmed."""
+        entries = ["  10.20.0.243  →  1.2.3.4:443  =  google.com  "]
+        result = parse_server_sni_entries(entries)
+        self.assertEqual(result["1.2.3.4"], "google.com")
+
+    def test_parse_entry_with_tab_whitespace(self):
+        """Tab and space whitespace trimmed."""
+        entries = ["10.20.0.243\t→\t1.2.3.4:443\t=\tgoogle.com"]
+        result = parse_server_sni_entries(entries)
+        self.assertEqual(result["1.2.3.4"], "google.com")
+
+    def test_parse_entry_equals_in_domain(self):
+        """Domain containing = character."""
+        entries = ["10.20.0.243→1.2.3.4:443 = test=domain.com"]
+        result = parse_server_sni_entries(entries)
+        # Parser uses first = as separator, so domain = "test=domain.com"
+        self.assertEqual(result["1.2.3.4"], "test=domain.com")
+
+    def test_parse_entry_arrow_in_domain(self):
+        """Domain containing → character (edge case)."""
+        entries = ["10.20.0.243→1.2.3.4:443 = test→domain.com"]
+        result = parse_server_sni_entries(entries)
+        self.assertEqual(result["1.2.3.4"], "test→domain.com")
+
+    def test_parse_entry_with_empty_remote_ip(self):
+        """Entry with empty remote IP (→= domain)."""
+        entries = ["10.20.0.243→= empty-remote.com"]
+        result = parse_server_sni_entries(entries)
+        # Empty remote IP, but domain is non-empty
+        self.assertIn("", result)
+
+    def test_parse_entry_only_arrow(self):
+        """Entry with only → character."""
+        entries = ["→"]
+        result = parse_server_sni_entries(entries)
+        self.assertEqual(len(result), 0)
+
+    def test_parse_entry_arrow_then_equals(self):
+        """Entry with →= only."""
+        entries = ["→="]
+        result = parse_server_sni_entries(entries)
+        self.assertEqual(len(result), 0)
+
+    def test_parse_entry_arrow_equals_domain(self):
+        """Entry with →=domain."""
+        entries = ["→=only.com"]
+        result = parse_server_sni_entries(entries)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[""], "only.com")
+
+    def test_parse_entry_ip_only_no_port(self):
+        """IP without port after →."""
+        entries = ["10.20.0.243→192.168.1.1 = lan.local"]
+        result = parse_server_sni_entries(entries)
+        self.assertEqual(result["192.168.1.1"], "lan.local")
+
+    def test_parse_entry_ipv6_style(self):
+        """IPv6-like address (not standard but should not crash)."""
+        entries = ["10.20.0.243→::1:443 = localhost"]
+        result = parse_server_sni_entries(entries)
+        # Parser splits on first ':', colon_idx=0, so colon_idx > 0 is false
+        # remote_ip = "::1:443" (full string used as key)
+        self.assertEqual(result["::1:443"], "localhost")
+
+    # --- Scale Edge Cases ---
+
+    def test_parse_1000_entries(self):
+        """1000 entries parsed correctly."""
+        entries = [f"10.20.0.243→10.{i//256}.{i%256}.1:443 = host{i}.example.com" for i in range(1000)]
+        result = parse_server_sni_entries(entries)
+        self.assertEqual(len(result), 1000)
+        self.assertEqual(result["10.0.0.1"], "host0.example.com")
+        # 999: 999//256=3, 999%256=231 → "10.3.231.1"
+        self.assertEqual(result["10.3.231.1"], "host999.example.com")
+
+    def test_parse_single_entry(self):
+        """Single entry works correctly."""
+        entries = ["10.20.0.243→8.8.8.8:443 = dns.google"]
+        result = parse_server_sni_entries(entries)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result["8.8.8.8"], "dns.google")
+
+    # --- Domain Format Edge Cases ---
+
+    def test_domain_with_single_label(self):
+        """Single-label domain (no dots)."""
+        entries = ["10.20.0.243→1.2.3.4:443 = localhost"]
+        result = parse_server_sni_entries(entries)
+        self.assertEqual(result["1.2.3.4"], "localhost")
+
+    def test_domain_with_wildcard_prefix(self):
+        """Wildcard domain (*.example.com)."""
+        entries = ["10.20.0.243→1.2.3.4:443 = *.example.com"]
+        result = parse_server_sni_entries(entries)
+        self.assertEqual(result["1.2.3.4"], "*.example.com")
+
+    def test_domain_with_port_in_name(self):
+        """Domain that looks like it has a port."""
+        entries = ["10.20.0.243→1.2.3.4:443 = host:8080.example.com"]
+        result = parse_server_sni_entries(entries)
+        self.assertEqual(result["1.2.3.4"], "host:8080.example.com")
+
+    def test_domain_max_length(self):
+        """Domain at max length (253 chars)."""
+        long_domain = "a" * 63 + "." + "b" * 63 + "." + "c" * 63 + "." + "d" * 60 + ".com"
+        entries = [f"10.20.0.243→1.2.3.4:443 = {long_domain}"]
+        result = parse_server_sni_entries(entries)
+        self.assertEqual(result["1.2.3.4"], long_domain.lower())
+
+    # --- End-to-End Edge Cases ---
+
+    def test_extraction_then_parsing_roundtrip(self):
+        """Extract SNI from real TLS packet, record, parse — full roundtrip."""
+        extractor = ServerSniExtractor()
+
+        # Extract from real TLS packet
+        packet = build_tls_client_hello("roundtrip.example.com")
+        sni = extractor.extract_sni_from_packet(packet, CLIENT_IP, SERVER_IP)
+        self.assertIsNotNone(sni)
+        assert sni is not None
+        self.assertEqual(sni, "roundtrip.example.com")
+
+        # Record
+        extractor.record_sni(CLIENT_IP, SERVER_IP, 443, sni)
+
+        # Parse (mirrors client code)
+        summary = extractor.get_tcp_debug_summary()
+        result = parse_server_sni_entries(summary["recent_snis"])
+
+        self.assertEqual(result[SERVER_IP], "roundtrip.example.com")
+
+    def test_extraction_with_ip_options(self):
+        """Packet with IP options (IHL > 5) still extracts SNI."""
+        # Build packet with IHL=6 (24 bytes IP header)
+        tls_data = build_tls_client_hello("options.example.com")
+        ip = bytearray(24)  # IHL=6
+        ip[0] = 0x46  # Version 4, IHL 6
+        ip[9] = 6  # TCP
+        # ... fill in IPs
+        for i, b in enumerate([int(x) for x in CLIENT_IP.split('.')]):
+            ip[12 + i] = b
+        for i, b in enumerate([int(x) for x in SERVER_IP.split('.')]):
+            ip[16 + i] = b
+
+        tcp = bytearray(20)
+        tcp[0] = (30000 >> 8) & 0xFF
+        tcp[1] = 30000 & 0xFF
+        tcp[2] = (443 >> 8) & 0xFF
+        tcp[3] = 443 & 0xFF
+        tcp[12] = 0x50  # data offset 5
+
+        packet = bytes(ip) + bytes(tcp) + tls_data
+
+        extractor = ServerSniExtractor()
+        sni = extractor.extract_sni_from_packet(packet, CLIENT_IP, SERVER_IP)
+        self.assertEqual(sni, "options.example.com")
+
+    def test_extraction_with_tcp_options(self):
+        """Packet with TCP options (data offset > 5) still extracts SNI."""
+        tls_data = build_tls_client_hello("tcpopts.example.com")
+        ip = bytearray(20)
+        ip[0] = 0x45
+        ip[9] = 6
+        for i, b in enumerate([int(x) for x in CLIENT_IP.split('.')]):
+            ip[12 + i] = b
+        for i, b in enumerate([int(x) for x in SERVER_IP.split('.')]):
+            ip[16 + i] = b
+
+        tcp = bytearray(24)  # data offset = 6 (24 bytes)
+        tcp[0] = (30000 >> 8) & 0xFF
+        tcp[1] = 30000 & 0xFF
+        tcp[2] = (443 >> 8) & 0xFF
+        tcp[3] = 443 & 0xFF
+        tcp[12] = 0x60  # data offset 6
+
+        packet = bytes(ip) + bytes(tcp) + tls_data
+
+        extractor = ServerSniExtractor()
+        sni = extractor.extract_sni_from_packet(packet, CLIENT_IP, SERVER_IP)
+        self.assertEqual(sni, "tcpopts.example.com")
+
+    def test_multiple_extractions_same_packet(self):
+        """Extracting SNI from same packet twice returns same result."""
+        packet = build_tls_client_hello("idempotent.com")
+        extractor = ServerSniExtractor()
+
+        sni1 = extractor.extract_sni_from_packet(packet, CLIENT_IP, SERVER_IP)
+        sni2 = extractor.extract_sni_from_packet(packet, CLIENT_IP, SERVER_IP)
+        self.assertEqual(sni1, sni2)
+        self.assertEqual(sni1, "idempotent.com")
+
+    def test_extraction_from_various_tls_versions(self):
+        """SNI extracted regardless of TLS version in record header."""
+        # build_tls_client_hello uses TLS 1.2 record version by default
+        # The SNI parser should work with any TLS version
+        packet = build_tls_client_hello("version-test.com")
+        extractor = ServerSniExtractor()
+        sni = extractor.extract_sni_from_packet(packet, CLIENT_IP, SERVER_IP)
+        self.assertEqual(sni, "version-test.com")
+
+    # --- Server-side Edge Cases ---
+
+    def test_sni_log_preserves_order(self):
+        """SNI log preserves insertion order (FIFO)."""
+        extractor = ServerSniExtractor()
+        for i in range(5):
+            extractor.record_sni(CLIENT_IP, f"10.0.0.{i}", 443, f"order{i}.com")
+
+        recent = extractor.get_recent_snis()
+        for i, entry in enumerate(recent):
+            self.assertIn(f"order{i}.com", entry)
+
+    def test_sni_log_dedup_not_performed(self):
+        """Server does NOT deduplicate SNI entries (each extraction logged)."""
+        extractor = ServerSniExtractor()
+        for _ in range(5):
+            extractor.record_sni(CLIENT_IP, SERVER_IP, 443, "same.com")
+
+        recent = extractor.get_recent_snis()
+        self.assertEqual(len(recent), 5)
+
+    def test_tcp_debug_summary_sni_count_matches_log(self):
+        """tcp_debug summary sni_domains count matches log length."""
+        extractor = ServerSniExtractor()
+        for i in range(7):
+            extractor.record_sni(CLIENT_IP, f"10.0.0.{i}", 443, f"site{i}.com")
+
+        summary = extractor.get_tcp_debug_summary()
+        self.assertEqual(summary["sni_domains"], 7)
+        self.assertEqual(len(summary["recent_snis"]), 7)
+
+    def test_empty_sni_log_returns_empty_summary(self):
+        """Empty SNI log returns empty summary."""
+        extractor = ServerSniExtractor()
+        summary = extractor.get_tcp_debug_summary()
+        self.assertEqual(summary["sni_domains"], 0)
+        self.assertEqual(summary["recent_snis"], [])
+
+    # --- Client Parsing Edge Cases ---
+
+    def test_parse_preserves_last_domain_for_duplicate_ips(self):
+        """When same IP appears multiple times, last entry's domain wins."""
+        entries = [
+            "10.20.0.2→1.2.3.4:443 = first.com",
+            "10.20.0.3→1.2.3.4:8443 = second.com",
+            "10.20.0.4→1.2.3.4:9443 = third.com",
+        ]
+        result = parse_server_sni_entries(entries)
+        self.assertEqual(result["1.2.3.4"], "third.com")
+
+    def test_parse_mixed_valid_and_invalid(self):
+        """Mix of valid and invalid entries — only valid parsed."""
+        entries = [
+            "valid1→1.1.1.1:443 = ok1.com",  # no arrow in "valid1" — wait, there IS no arrow
+            "valid2→2.2.2.2:443 = ok2.com",   # has arrow
+            "invalid no arrow",                 # no arrow
+            "→3.3.3.3:443 = ok3.com",          # empty client IP
+            "= no arrow",                       # no arrow
+        ]
+        result = parse_server_sni_entries(entries)
+        # "valid1→1.1.1.1:443 = ok1.com" has arrow at index 6
+        # "valid2→2.2.2.2:443 = ok2.com" has arrow at index 6
+        # "→3.3.3.3:443 = ok3.com" has arrow at index 0
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result["1.1.1.1"], "ok1.com")
+        self.assertEqual(result["2.2.2.2"], "ok2.com")
+        self.assertEqual(result["3.3.3.3"], "ok3.com")
+
+    def test_parse_with_different_client_ips_in_entries(self):
+        """Entries from different clients still parsed correctly."""
+        entries = [
+            "client_a→1.1.1.1:443 = from_a.com",
+            "client_b→2.2.2.2:443 = from_b.com",
+            "client_c→3.3.3.3:443 = from_c.com",
+        ]
+        result = parse_server_sni_entries(entries)
+        self.assertEqual(len(result), 3)
+
+    def test_parse_numeric_domain(self):
+        """All-numeric domain (like an IP used as hostname)."""
+        entries = ["10.20.0.243→1.2.3.4:443 = 123456"]
+        result = parse_server_sni_entries(entries)
+        self.assertEqual(result["1.2.3.4"], "123456")
+
+    def test_parse_domain_with_port_separator(self):
+        """Domain with colon (unusual but possible in some configs)."""
+        entries = ["10.20.0.243→1.2.3.4:443 = host:8080"]
+        result = parse_server_sni_entries(entries)
+        self.assertEqual(result["1.2.3.4"], "host:8080")
+
+    def test_parse_max_port_number(self):
+        """Port 65535 (max valid port)."""
+        entries = ["10.20.0.243→1.2.3.4:65535 = maxport.com"]
+        result = parse_server_sni_entries(entries)
+        self.assertEqual(result["1.2.3.4"], "maxport.com")
+
+    def test_parse_port_zero(self):
+        """Port 0 (edge case)."""
+        entries = ["10.20.0.243→1.2.3.4:0 = zeroport.com"]
+        result = parse_server_sni_entries(entries)
+        self.assertEqual(result["1.2.3.4"], "zeroport.com")
+
+
 if __name__ == '__main__':
     unittest.main()

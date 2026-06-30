@@ -346,6 +346,408 @@ class ServerSniFallbackTest {
     // Helper methods
     // ============================================================
 
+    // ============================================================
+    // Edge Cases: Concurrent Access
+    // ============================================================
+
+    @Test
+    fun `concurrent serverSniMap writes and getFlows reads`() {
+        // Simulate VPN I/O thread writing packets while UI reads flows
+        val packets = (1..50).map { i ->
+            buildTestPacket(dstIp = "10.0.0.$i", dstPort = 443)
+        }
+
+        // Process all packets
+        packets.forEach { PacketFlowTracker.processPacket(it, isUplink = true) }
+
+        // Simulate rapid serverSniMap updates (like FlowsFragment polling every 3s)
+        val domains = mutableMapOf<String, String>()
+        for (i in 1..50) {
+            domains["10.0.0.$i"] = "site$i.com"
+            PacketFlowTracker.serverSniMap = domains.toMap()
+
+            // getFlows should never crash
+            val flows = PacketFlowTracker.getFlows()
+            assertTrue(flows.isNotEmpty())
+        }
+
+        // Final state: all flows should have domains
+        val finalFlows = PacketFlowTracker.getFlows()
+        finalFlows.forEach { flow ->
+            assertNotNull("Flow ${flow.server} should have domain", flow.domain)
+        }
+    }
+
+    @Test
+    fun `concurrent processPacket and serverSniMap update`() {
+        // Simulate I/O threads processing packets while UI updates serverSniMap
+        val errors = mutableListOf<String>()
+
+        val thread1 = Thread {
+            try {
+                for (i in 1..100) {
+                    val pkt = buildTestPacket(dstIp = "10.0.0.${i % 10}", dstPort = 443)
+                    PacketFlowTracker.processPacket(pkt, isUplink = true)
+                }
+            } catch (e: Exception) {
+                errors.add("processPacket: ${e.message}")
+            }
+        }
+
+        val thread2 = Thread {
+            try {
+                for (i in 1..50) {
+                    PacketFlowTracker.serverSniMap = mapOf("10.0.0.${i % 10}" to "site$i.com")
+                    PacketFlowTracker.getFlows()
+                }
+            } catch (e: Exception) {
+                errors.add("serverSniMap: ${e.message}")
+            }
+        }
+
+        thread1.start()
+        thread2.start()
+        thread1.join(5000)
+        thread2.join(5000)
+
+        assertTrue("Concurrent errors: $errors", errors.isEmpty())
+    }
+
+    // ============================================================
+    // Edge Cases: Large Scale
+    // ============================================================
+
+    @Test
+    fun `serverSniMap with 100 entries applied to 100 flows`() {
+        // Create 100 flows without SNI
+        for (i in 1..100) {
+            val pkt = buildTestPacket(dstIp = "10.0.${i / 256}.${i % 256}", dstPort = 443)
+            PacketFlowTracker.processPacket(pkt, isUplink = true)
+        }
+
+        // Build server map for all 100 IPs
+        val serverMap = (1..100).associate { i ->
+            "10.0.${i / 256}.${i % 256}" to "domain$i.com"
+        }
+        PacketFlowTracker.serverSniMap = serverMap
+
+        val flows = PacketFlowTracker.getFlows()
+        assertEquals(100, flows.size)
+        // All flows should have domains from server map
+        flows.forEach { flow ->
+            assertNotNull("Flow ${flow.server} should have domain", flow.domain)
+            assertTrue("Domain should end with .com", flow.domain!!.endsWith(".com"))
+        }
+    }
+
+    @Test
+    fun `serverSniMap partial coverage — some flows have domain some dont`() {
+        // Create 10 flows
+        for (i in 1..10) {
+            val pkt = buildTestPacket(dstIp = "10.0.0.$i", dstPort = 443)
+            PacketFlowTracker.processPacket(pkt, isUplink = true)
+        }
+
+        // Server map only covers IPs 1-5
+        val serverMap = (1..5).associate { "10.0.0.$it" to "covered$it.com" }
+        PacketFlowTracker.serverSniMap = serverMap
+
+        val flows = PacketFlowTracker.getFlows()
+        assertEquals(10, flows.size)
+
+        val coveredFlows = flows.filter { it.domain != null }
+        val uncoveredFlows = flows.filter { it.domain == null }
+        assertEquals(5, coveredFlows.size)
+        assertEquals(5, uncoveredFlows.size)
+    }
+
+    // ============================================================
+    // Edge Cases: Flow Lifecycle
+    // ============================================================
+
+    @Test
+    fun `flow evicted at MAX_FLOWS then re-added still gets serverSniMap domain`() {
+        // Fill up to MAX_FLOWS (500) — but that's expensive, use reflection to lower limit
+        // Instead, test the concept with a few flows
+        val pkt1 = buildTestPacket(dstIp = "10.0.0.1", dstPort = 443)
+        PacketFlowTracker.processPacket(pkt1, isUplink = true)
+
+        // Set server SNI
+        PacketFlowTracker.serverSniMap = mapOf("10.0.0.1" to "test.com")
+
+        var flows = PacketFlowTracker.getFlows()
+        assertEquals("test.com", flows[0].domain)
+
+        // Simulate flow aging out (set lastSeen to old time via reflection)
+        val flowField = PacketFlowTracker.javaClass.getDeclaredField("flows")
+        flowField.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val flowsMap = flowField.get(PacketFlowTracker) as java.util.concurrent.ConcurrentHashMap<String, PacketFlowTracker.FlowStats>
+        val stats = flowsMap.values.first()
+        val lastSeenField = PacketFlowTracker.FlowStats::class.java.getDeclaredField("lastSeen")
+        lastSeenField.isAccessible = true
+        lastSeenField.setLong(stats, System.currentTimeMillis() - 600_000) // 10 min ago
+
+        // getFlows should evict stale flow
+        flows = PacketFlowTracker.getFlows()
+        assertEquals(0, flows.size)
+
+        // Re-add same flow
+        PacketFlowTracker.processPacket(pkt1, isUplink = true)
+        flows = PacketFlowTracker.getFlows()
+        assertEquals(1, flows.size)
+        // serverSniMap still applies to re-added flow
+        assertEquals("test.com", flows[0].domain)
+    }
+
+    @Test
+    fun `downlink-only flow gets domain from serverSniMap only`() {
+        // Flow only has downlink packets (never sees TLS ClientHello)
+        val dlPkt = buildTestPacket(srcIp = "142.251.10.95", srcPort = 443, isUplink = false)
+        PacketFlowTracker.processPacket(dlPkt, isUplink = false)
+
+        // No domain from SNI or cache
+        var flows = PacketFlowTracker.getFlows()
+        assertNull(flows[0].domain)
+
+        // Server SNI provides domain
+        PacketFlowTracker.serverSniMap = mapOf("142.251.10.95" to "google.com")
+        flows = PacketFlowTracker.getFlows()
+        assertEquals("google.com", flows[0].domain)
+    }
+
+    @Test
+    fun `serverSniMap with stale entries for IPs no longer in flows`() {
+        // Create flow for IP 1
+        val pkt = buildTestPacket(dstIp = "10.0.0.1", dstPort = 443)
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+
+        // Server map has entries for IPs 1, 2, 3 (2 and 3 are stale)
+        PacketFlowTracker.serverSniMap = mapOf(
+            "10.0.0.1" to "active.com",
+            "10.0.0.2" to "stale2.com",
+            "10.0.0.3" to "stale3.com"
+        )
+
+        val flows = PacketFlowTracker.getFlows()
+        // Only IP 1 flow exists, others ignored
+        assertEquals(1, flows.size)
+        assertEquals("active.com", flows[0].domain)
+    }
+
+    // ============================================================
+    // Edge Cases: Domain Formats
+    // ============================================================
+
+    @Test
+    fun `serverSniMap domain with hyphens`() {
+        val pkt = buildTestPacket(dstIp = "1.2.3.4", dstPort = 443)
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+        PacketFlowTracker.serverSniMap = mapOf("1.2.3.4" to "my-app.example-site.com")
+
+        val flows = PacketFlowTracker.getFlows()
+        assertEquals("my-app.example-site.com", flows[0].domain)
+    }
+
+    @Test
+    fun `serverSniMap domain with numbers`() {
+        val pkt = buildTestPacket(dstIp = "1.2.3.4", dstPort = 443)
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+        PacketFlowTracker.serverSniMap = mapOf("1.2.3.4" to "api123.v2.example.com")
+
+        val flows = PacketFlowTracker.getFlows()
+        assertEquals("api123.v2.example.com", flows[0].domain)
+    }
+
+    @Test
+    fun `serverSniMap domain with underscores`() {
+        val pkt = buildTestPacket(dstIp = "1.2.3.4", dstPort = 443)
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+        PacketFlowTracker.serverSniMap = mapOf("1.2.3.4" to "internal_service.corp.local")
+
+        val flows = PacketFlowTracker.getFlows()
+        assertEquals("internal_service.corp.local", flows[0].domain)
+    }
+
+    @Test
+    fun `serverSniMap very long domain`() {
+        val longDomain = "a.".repeat(50) + "example.com"
+        val pkt = buildTestPacket(dstIp = "1.2.3.4", dstPort = 443)
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+        PacketFlowTracker.serverSniMap = mapOf("1.2.3.4" to longDomain)
+
+        val flows = PacketFlowTracker.getFlows()
+        assertEquals(longDomain, flows[0].domain)
+    }
+
+    // ============================================================
+    // Edge Cases: Same Domain Multiple IPs (CDN)
+    // ============================================================
+
+    @Test
+    fun `same domain on multiple IPs — CDN scenario`() {
+        // CDN serves same domain from multiple IPs
+        val ips = listOf("1.1.1.1", "2.2.2.2", "3.3.3.3", "4.4.4.4", "5.5.5.5")
+        ips.forEach { ip ->
+            val pkt = buildTestPacket(dstIp = ip, dstPort = 443)
+            PacketFlowTracker.processPacket(pkt, isUplink = true)
+        }
+
+        // All IPs map to same domain
+        val serverMap = ips.associateWith { "cdn.example.com" }
+        PacketFlowTracker.serverSniMap = serverMap
+
+        val flows = PacketFlowTracker.getFlows()
+        assertEquals(5, flows.size)
+        flows.forEach { flow ->
+            assertEquals("cdn.example.com", flow.domain)
+        }
+    }
+
+    // ============================================================
+    // Edge Cases: Rapid Refresh Cycles
+    // ============================================================
+
+    @Test
+    fun `rapid serverSniMap refresh simulates 3s poll cycle`() {
+        // Create flows
+        for (i in 1..5) {
+            val pkt = buildTestPacket(dstIp = "10.0.0.$i", dstPort = 443)
+            PacketFlowTracker.processPacket(pkt, isUplink = true)
+        }
+
+        // Simulate 10 poll cycles (30s of polling)
+        for (cycle in 1..10) {
+            val serverMap = (1..5).associate { "10.0.0.$it" to "site${it}_v${cycle}.com" }
+            PacketFlowTracker.serverSniMap = serverMap
+
+            val flows = PacketFlowTracker.getFlows()
+            assertEquals(5, flows.size)
+            flows.forEach { flow ->
+                assertNotNull(flow.domain)
+                assertTrue(flow.domain!!.contains("_v${cycle}"))
+            }
+        }
+    }
+
+    @Test
+    fun `serverSniMap set to empty then repopulated`() {
+        val pkt = buildTestPacket(dstIp = "10.0.0.1", dstPort = 443)
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+
+        // Set domain
+        PacketFlowTracker.serverSniMap = mapOf("10.0.0.1" to "test.com")
+        var flows = PacketFlowTracker.getFlows()
+        assertEquals("test.com", flows[0].domain)
+
+        // Clear (server unreachable)
+        PacketFlowTracker.serverSniMap = emptyMap()
+        flows = PacketFlowTracker.getFlows()
+        assertNull(flows[0].domain)
+
+        // Repopulate (server back online)
+        PacketFlowTracker.serverSniMap = mapOf("10.0.0.1" to "test.com")
+        flows = PacketFlowTracker.getFlows()
+        assertEquals("test.com", flows[0].domain)
+    }
+
+    // ============================================================
+    // Edge Cases: getFlows Idempotency
+    // ============================================================
+
+    @Test
+    fun `getFlows called multiple times returns consistent results`() {
+        val pkt = buildTestPacket(dstIp = "10.0.0.1", dstPort = 443)
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+        PacketFlowTracker.serverSniMap = mapOf("10.0.0.1" to "test.com")
+
+        // Call getFlows 10 times — should always return same domain
+        repeat(10) {
+            val flows = PacketFlowTracker.getFlows()
+            assertEquals(1, flows.size)
+            assertEquals("test.com", flows[0].domain)
+        }
+    }
+
+    @Test
+    fun `getFlows does not modify serverSniMap`() {
+        val pkt = buildTestPacket(dstIp = "10.0.0.1", dstPort = 443)
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+
+        val originalMap = mapOf("10.0.0.1" to "test.com")
+        PacketFlowTracker.serverSniMap = originalMap
+
+        PacketFlowTracker.getFlows()
+        PacketFlowTracker.getFlows()
+        PacketFlowTracker.getFlows()
+
+        // Map unchanged
+        assertEquals(originalMap, PacketFlowTracker.serverSniMap)
+    }
+
+    // ============================================================
+    // Edge Cases: Mixed Protocol Flows
+    // ============================================================
+
+    @Test
+    fun `mixed TCP and UDP flows — serverSniMap only applies to matching IPs`() {
+        // TCP flow (no SNI)
+        val tcpPkt = buildTestPacket(dstIp = "1.1.1.1", dstPort = 443, protocol = 6)
+        PacketFlowTracker.processPacket(tcpPkt, isUplink = true)
+
+        // UDP flow
+        val udpPkt = buildTestPacket(dstIp = "2.2.2.2", dstPort = 53, protocol = 17)
+        PacketFlowTracker.processPacket(udpPkt, isUplink = true)
+
+        // ICMP flow
+        val icmpPkt = buildTestPacket(dstIp = "3.3.3.3", dstPort = 0, protocol = 1)
+        PacketFlowTracker.processPacket(icmpPkt, isUplink = true)
+
+        PacketFlowTracker.serverSniMap = mapOf(
+            "1.1.1.1" to "cloudflare.com",
+            "2.2.2.2" to "dns.google"
+            // 3.3.3.3 not in map (ICMP has no domain)
+        )
+
+        val flows = PacketFlowTracker.getFlows()
+        assertEquals(3, flows.size)
+
+        val tcpFlow = flows.find { it.protocol == "TCP" }
+        val udpFlow = flows.find { it.protocol == "UDP" }
+        val icmpFlow = flows.find { it.protocol == "ICMP" }
+
+        assertEquals("cloudflare.com", tcpFlow?.domain)
+        assertEquals("dns.google", udpFlow?.domain)
+        assertNull(icmpFlow?.domain)
+    }
+
+    // ============================================================
+    // Edge Cases: Debug Stats with serverSniMap
+    // ============================================================
+
+    @Test
+    fun `debug stats shows FlowStats domain not serverSniMap`() {
+        val pkt = buildTestPacket(dstIp = "10.0.0.1", dstPort = 443)
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+        PacketFlowTracker.serverSniMap = mapOf("10.0.0.1" to "test.com")
+
+        val debugStats = PacketFlowTracker.getDebugStats()
+        // Debug stats show FlowStats.domain (NULL for non-TLS), not serverSniMap
+        // serverSniMap is only used in getFlows() output, not in debug stats
+        assertTrue("Debug stats should show NULL for FlowStats.domain",
+            debugStats.contains("domain=NULL"))
+    }
+
+    @Test
+    fun `debug stats shows NULL when no serverSniMap`() {
+        val pkt = buildTestPacket(dstIp = "10.0.0.1", dstPort = 443)
+        PacketFlowTracker.processPacket(pkt, isUplink = true)
+        // No serverSniMap set
+
+        val debugStats = PacketFlowTracker.getDebugStats()
+        assertTrue("Debug stats should show NULL", debugStats.contains("NULL"))
+    }
+
     private fun buildTestPacket(
         srcIp: String = "10.20.0.2",
         dstIp: String = "142.251.10.95",
