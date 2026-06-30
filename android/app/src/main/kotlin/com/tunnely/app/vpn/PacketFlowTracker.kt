@@ -32,6 +32,10 @@ object PacketFlowTracker {
     @Volatile var uplinkTcpPackets: Long = 0
     @Volatile var sniDomainsExtracted: Long = 0
     @Volatile var cacheHits: Long = 0
+    @Volatile var tlsRecordsSeen: Long = 0      // TCP packets with TLS content type 0x16
+    @Volatile var clientHellosSeen: Long = 0     // TLS records with handshake type 0x01
+    @Volatile var sniParseAttempts: Long = 0     // ClientHello records passed to SNI parser
+    @Volatile var sniParseFailures: Long = 0     // SNI parser returned null
 
     private val flows = ConcurrentHashMap<String, FlowStats>()
 
@@ -45,10 +49,11 @@ object PacketFlowTracker {
                 "${f.remoteIp}:${f.remotePort} domain=${f.domain ?: "NULL"} cached=${cached ?: "NULL"}"
             }
             .joinToString("; ")
-        return "packets=$totalPacketsProcessed, uplinkTcp=$uplinkTcpPackets, " +
-            "sniExtracted=$sniDomainsExtracted, cacheHits=$cacheHits, " +
-            "flows=${flows.size}, cacheSize=${DomainCache.size()}\n" +
-            "domains: $flowDomains"
+        return "pkts=$totalPacketsProcessed tcp=$uplinkTcpPackets " +
+            "tls=$tlsRecordsSeen ch=$clientHellosSeen " +
+            "parse=$sniParseAttempts fail=$sniParseFailures " +
+            "sni=$sniDomainsExtracted cache=$cacheHits/${DomainCache.size()}\n" +
+            "$flowDomains"
     }
 
     /**
@@ -105,10 +110,28 @@ object PacketFlowTracker {
         var domain: String? = null
         if (isUplink && protoName == "TCP") {
             uplinkTcpPackets++
-            domain = SniParser.extractSni(packet)
-            if (domain != null) {
-                sniDomainsExtracted++
-                DomainCache.putDomain(remoteIp, domain)
+            // Check TLS record header before calling SniParser
+            val tcpDataOffset = if (packet.size >= ihl + 12) {
+                ((packet[ihl + 12].toInt() and 0xF0) shr 4) * 4
+            } else 0
+            val payloadStart = ihl + tcpDataOffset
+            if (packet.size > payloadStart + 5) {
+                val tlsContentType = packet[payloadStart].toInt() and 0xFF
+                if (tlsContentType == 0x16) { // TLS Handshake
+                    tlsRecordsSeen++
+                    val handshakeType = packet[payloadStart + 5].toInt() and 0xFF
+                    if (handshakeType == 0x01) { // ClientHello
+                        clientHellosSeen++
+                        sniParseAttempts++
+                        domain = SniParser.extractSni(packet)
+                        if (domain != null) {
+                            sniDomainsExtracted++
+                            DomainCache.putDomain(remoteIp, domain)
+                        } else {
+                            sniParseFailures++
+                        }
+                    }
+                }
             }
         }
 
@@ -206,6 +229,10 @@ object PacketFlowTracker {
         uplinkTcpPackets = 0
         sniDomainsExtracted = 0
         cacheHits = 0
+        tlsRecordsSeen = 0
+        clientHellosSeen = 0
+        sniParseAttempts = 0
+        sniParseFailures = 0
     }
 
     private fun ipToString(packet: ByteArray, offset: Int): String {
