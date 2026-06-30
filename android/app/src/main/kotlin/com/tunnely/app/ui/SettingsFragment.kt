@@ -147,14 +147,23 @@ class SettingsFragment : Fragment() {
             btnPickApps.isEnabled = isChecked
             layoutSplitMode.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
             textSplitHint.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
+            // Save immediately so VPN service reads correct value at connect time
+            val app = requireActivity().application as TunnelyApp
+            app.prefs.splitTunneling = isChecked
         }
 
         btnModeExclude.setOnClickListener {
             updateModeButtons("exclude")
+            // Save immediately
+            val app = requireActivity().application as TunnelyApp
+            app.prefs.splitMode = "exclude"
         }
 
         btnModeInclude.setOnClickListener {
             updateModeButtons("include")
+            // Save immediately
+            val app = requireActivity().application as TunnelyApp
+            app.prefs.splitMode = "include"
         }
 
         switchRemoteLogging.setOnCheckedChangeListener { _, isChecked ->
