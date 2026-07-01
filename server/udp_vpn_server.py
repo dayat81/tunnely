@@ -42,7 +42,7 @@ except ImportError:
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
-__version__ = "3.24.2"
+__version__ = "3.25.0"
 
 TUNSETIFF = 0x400454CA
 IFF_TUN = 0x0001
@@ -446,6 +446,8 @@ class UdpVpnServer:
         self.sock: socket.socket | None = None
         self.dns_sock: socket.socket | None = None  # for forwarding private DNS
         self.dns_tracks: dict = {}  # src_port → (client_ip, client_addr)
+        self.dns_ip_map: dict = {}  # ip → domain (from DNS A record responses)
+        self.dns_query_names: dict = {}  # src_port → queried domain name
         self.start_time = time.time()
         self.last_stats = 0
         self.last_save = 0
@@ -828,13 +830,29 @@ class UdpVpnServer:
                 self._tls_sni_log.pop(0)
             log(f"  [QUIC] {client_ip}→{dst_ip}:443 SNI={sni}")
         else:
-            # Debug: log failed QUIC extraction (sampled 1/5)
-            if self._quic_initial_seen % 5 == 1:
-                hdr = _parse_quic_header(udp_payload)
-                if hdr:
-                    log(f"  [QUIC-FAIL] {dst_ip} ver=0x{hdr['version']:08x} dcid={hdr['dcid'].hex()[:8]}.. len={len(udp_payload)}")
-                else:
-                    log(f"  [QUIC-FAIL] {dst_ip} len={len(udp_payload)} hdr=None")
+            # DNS fallback: if we know this IP from a prior DNS query, use that domain
+            dns_domain = self.dns_ip_map.get(dst_ip)
+            if dns_domain:
+                self._quic_sni_extracted += 1  # count as success (DNS-resolved)
+                self._quic_sni_cache[dst_ip] = dns_domain
+                if client_ip not in self._tcp_tracker:
+                    self._tcp_tracker[client_ip] = {}
+                flow_key = f"{dst_ip}:443"
+                self._tcp_tracker[client_ip][flow_key] = {
+                    "syn": 0, "established": True, "tls_hello": 1, "sni": dns_domain
+                }
+                self._tls_sni_log.append(f"{client_ip}→{dst_ip}:443 = {dns_domain} [dns]")
+                if len(self._tls_sni_log) > 50:
+                    self._tls_sni_log.pop(0)
+                log(f"  [QUIC-DNS] {client_ip}→{dst_ip}:443 SNI={dns_domain}")
+            else:
+                # Debug: log failed QUIC extraction (sampled 1/5)
+                if self._quic_initial_seen % 5 == 1:
+                    hdr = _parse_quic_header(udp_payload)
+                    if hdr:
+                        log(f"  [QUIC-FAIL] {dst_ip} ver=0x{hdr['version']:08x} dcid={hdr['dcid'].hex()[:8]}.. len={len(udp_payload)}")
+                    else:
+                        log(f"  [QUIC-FAIL] {dst_ip} len={len(udp_payload)} hdr=None")
 
     def _extract_sni_from_payload(self, data: bytes, ch_offset: int) -> str:
         """Extract SNI from TLS ClientHello at given offset."""
@@ -910,9 +928,24 @@ class UdpVpnServer:
         quic_sni_count = len(self._quic_sni_cache)
         quic_sni_map = dict(self._quic_sni_cache)
 
-        # Combined: TCP + QUIC domain maps
-        combined_map = {**sni_domain_map, **quic_sni_map}
+        # DNS IP→domain map (from DNS response A records)
+        dns_map = dict(self.dns_ip_map)
+
+        # Combined: TCP + QUIC + DNS domain maps (DNS is lowest priority fallback)
+        combined_map = {**dns_map, **sni_domain_map, **quic_sni_map}
         combined_sni = len(combined_map)
+
+        # Also enrich TCP flows without SNI using DNS map
+        dns_enriched = 0
+        for client_flows in self._tcp_tracker.values():
+            for flow_key, flow in client_flows.items():
+                if not flow["sni"]:
+                    colon_idx = flow_key.rfind(':')
+                    remote_ip = flow_key[:colon_idx] if colon_idx > 0 else flow_key
+                    if remote_ip in self.dns_ip_map:
+                        flow["sni"] = self.dns_ip_map[remote_ip]
+                        dns_enriched += 1
+                        total_sni += 1
 
         return {
             "tcp_flows": sum(len(f) for f in self._tcp_tracker.values()),
@@ -925,6 +958,9 @@ class UdpVpnServer:
             "quic_sni_failed": self._quic_initial_seen - self._quic_sni_extracted,
             "quic_sni_domains": quic_sni_count,
             "quic_sni_map": quic_sni_map,
+            "dns_domains": len(dns_map),
+            "dns_enriched": dns_enriched,
+            "dns_ip_map": dns_map,
             "combined_sni_domains": combined_sni,
             "combined_sni_map": combined_map,
         }
@@ -941,6 +977,15 @@ class UdpVpnServer:
 
         # Track: response for this src_port goes back to this client
         self.dns_tracks[src_port] = (orig_dns_ip, client_ip, client_addr, time.time())
+        
+        # Parse DNS question to extract queried domain name
+        try:
+            if len(payload) > 12:
+                qname = self._parse_dns_qname(payload, 12)
+                if qname:
+                    self.dns_query_names[src_port] = qname.lower()
+        except Exception:
+            pass  # non-fatal
 
         # Forward to real DNS server
         try:
@@ -992,6 +1037,24 @@ class UdpVpnServer:
         # Find the oldest entry (FIFO)
         oldest_port = min(self.dns_tracks, key=lambda k: self.dns_tracks[k][3])
         orig_dns_ip, client_ip, client_addr, _ = self.dns_tracks.pop(oldest_port)
+        
+        # Extract A records from DNS response → dns_ip_map
+        qname = self.dns_query_names.pop(oldest_port, None)
+        if qname:
+            try:
+                a_records = self._parse_dns_a_records(data)
+                for ip in a_records:
+                    self.dns_ip_map[ip] = qname
+                if a_records:
+                    log(f"  [DNS] {qname} → {', '.join(a_records[:3])}")
+            except Exception:
+                pass  # non-fatal
+        
+        # Cap dns_ip_map size (LRU-like: just purge oldest half when too big)
+        if len(self.dns_ip_map) > 5000:
+            keys = list(self.dns_ip_map.keys())
+            for k in keys[:len(keys)//2]:
+                del self.dns_ip_map[k]
 
         # Build response IP/UDP packet with src=original_private_dns
         resp = self._build_udp_response(orig_dns_ip, client_ip, 53, oldest_port, data)
@@ -1001,6 +1064,99 @@ class UdpVpnServer:
             self.sessions.touch(client_ip, tx_bytes=len(resp))
         except OSError as e:
             log(f"DNS response TUN write error: {e}", "WARN")
+
+    @staticmethod
+    def _parse_dns_qname(data: bytes, offset: int) -> str | None:
+        """Parse DNS QNAME from packet starting at offset. Returns domain string."""
+        labels = []
+        jumped = False
+        jump_limit = 10
+        while jump_limit > 0:
+            if offset >= len(data):
+                return None
+            length = data[offset]
+            if length == 0:
+                offset += 1
+                break
+            # Pointer (compression)
+            if (length & 0xC0) == 0xC0:
+                if offset + 1 >= len(data):
+                    return None
+                if not jumped:
+                    # Save position after pointer for final offset
+                    pass
+                offset = ((length & 0x3F) << 8) | data[offset + 1]
+                jumped = True
+                jump_limit -= 1
+                continue
+            offset += 1
+            if offset + length > len(data):
+                return None
+            labels.append(data[offset:offset + length].decode('ascii', errors='ignore'))
+            offset += length
+        return '.'.join(labels) if labels else None
+
+    @staticmethod
+    def _parse_dns_a_records(data: bytes) -> list[str]:
+        """Parse DNS response and extract A record IP addresses."""
+        if len(data) < 12:
+            return []
+        # Header: ID(2) FLAGS(2) QDCOUNT(2) ANCOUNT(2) ...
+        qdcount = (data[4] << 8) | data[5]
+        ancount = (data[6] << 8) | data[7]
+        if ancount == 0:
+            return []
+
+        # Skip question section
+        offset = 12
+        for _ in range(qdcount):
+            # Skip QNAME
+            limit = 10
+            while limit > 0 and offset < len(data):
+                length = data[offset]
+                if length == 0:
+                    offset += 1
+                    break
+                if (length & 0xC0) == 0xC0:
+                    offset += 2
+                    break
+                offset += 1 + length
+                limit -= 1
+            offset += 4  # QTYPE(2) + QCLASS(2)
+
+        # Parse answer section
+        ips = []
+        for _ in range(ancount):
+            if offset >= len(data):
+                break
+            # Skip NAME (may be pointer)
+            if (data[offset] & 0xC0) == 0xC0:
+                offset += 2
+            else:
+                limit = 10
+                while limit > 0 and offset < len(data):
+                    length = data[offset]
+                    if length == 0:
+                        offset += 1
+                        break
+                    if (length & 0xC0) == 0xC0:
+                        offset += 2
+                        break
+                    offset += 1 + length
+                    limit -= 1
+
+            if offset + 10 > len(data):
+                break
+            rtype = (data[offset] << 8) | data[offset + 1]
+            rdlength = (data[offset + 8] << 8) | data[offset + 9]
+            offset += 10  # TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2)
+
+            if rtype == 1 and rdlength == 4 and offset + 4 <= len(data):  # A record
+                ip = f"{data[offset]}.{data[offset+1]}.{data[offset+2]}.{data[offset+3]}"
+                ips.append(ip)
+            offset += rdlength
+
+        return ips
 
     @staticmethod
     def _build_udp_response(src_ip: str, dst_ip: str, src_port: int, dst_port: int, payload: bytes) -> bytes:

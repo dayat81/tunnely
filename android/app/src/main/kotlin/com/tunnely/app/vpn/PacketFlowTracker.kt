@@ -36,6 +36,7 @@ object PacketFlowTracker {
     @Volatile var clientHellosSeen: Long = 0     // TLS records with handshake type 0x01
     @Volatile var sniParseAttempts: Long = 0     // ClientHello records passed to SNI parser
     @Volatile var sniParseFailures: Long = 0     // SNI parser returned null
+    @Volatile var dnsDomainsExtracted: Long = 0  // domains from DNS A record responses
 
     private val flows = ConcurrentHashMap<String, FlowStats>()
 
@@ -55,7 +56,7 @@ object PacketFlowTracker {
         return "pkts=$totalPacketsProcessed tcp=$uplinkTcpPackets " +
             "tls=$tlsRecordsSeen ch=$clientHellosSeen " +
             "parse=$sniParseAttempts fail=$sniParseFailures " +
-            "sni=$sniDomainsExtracted cache=$cacheHits/${DomainCache.size()}\n" +
+            "sni=$sniDomainsExtracted dns=$dnsDomainsExtracted cache=$cacheHits/${DomainCache.size()}\n" +
             "err:${SniParser.lastError} sid=${SniParser.lastSessionIdLen} " +
             "cs=${SniParser.lastCipherSuitesLen} comp=${SniParser.lastCompressionLen} " +
             "ext=${SniParser.lastExtensionsLen}/${SniParser.lastExtensionsEnd}/${SniParser.lastPacketSize}\n" +
@@ -139,6 +140,11 @@ object PacketFlowTracker {
                     }
                 }
             }
+        }
+
+        // Extract domain from DNS response A records (both uplink query + downlink response)
+        if (protoName == "UDP" && (dstPort == 53 || srcPort == 53)) {
+            parseDnsForDomainCache(packet, ihl, isUplink)
         }
 
         // Try cache for non-SNI packets (downlink or already cached)
@@ -231,6 +237,7 @@ object PacketFlowTracker {
         flows.clear()
         DomainCache.clear()
         serverSniMap = emptyMap()
+        pendingDnsQueries.clear()
         totalPacketsProcessed = 0
         uplinkTcpPackets = 0
         sniDomainsExtracted = 0
@@ -239,6 +246,122 @@ object PacketFlowTracker {
         clientHellosSeen = 0
         sniParseAttempts = 0
         sniParseFailures = 0
+        dnsDomainsExtracted = 0
+    }
+
+    // Pending DNS queries: transaction ID → queried domain name
+    // Used to match uplink queries with downlink responses
+    private val pendingDnsQueries = ConcurrentHashMap<Int, String>()
+
+    /**
+     * Parse DNS packets to extract IP→domain mappings.
+     * Works on both queries (to capture the question) and responses (to map A records).
+     * Populates DomainCache so subsequent TCP/QUIC connections to those IPs show the domain.
+     */
+    private fun parseDnsForDomainCache(packet: ByteArray, ihl: Int, isUplink: Boolean) {
+        try {
+            val udpPayloadOffset = ihl + 8
+            if (packet.size < udpPayloadOffset + 12) return  // minimum DNS header
+
+            val dnsData = packet.copyOfRange(udpPayloadOffset, packet.size)
+            val txId = ((dnsData[0].toInt() and 0xFF) shl 8) or (dnsData[1].toInt() and 0xFF)
+            val flags = ((dnsData[2].toInt() and 0xFF) shl 8) or (dnsData[3].toInt() and 0xFF)
+            val isResponse = (flags and 0x8000) != 0
+            val qdCount = ((dnsData[4].toInt() and 0xFF) shl 8) or (dnsData[5].toInt() and 0xFF)
+            val anCount = ((dnsData[6].toInt() and 0xFF) shl 8) or (dnsData[7].toInt() and 0xFF)
+
+            if (!isResponse) {
+                // Uplink query — extract and store the queried domain
+                if (qdCount > 0) {
+                    val qname = parseDnsQname(dnsData, 12)
+                    if (qname != null && qname.isNotEmpty()) {
+                        pendingDnsQueries[txId] = qname.lowercase()
+                        // Purge stale entries (keep max 200)
+                        if (pendingDnsQueries.size > 200) {
+                            val iter = pendingDnsQueries.iterator()
+                            var removed = 0
+                            while (iter.hasNext() && removed < 100) {
+                                iter.next(); iter.remove(); removed++
+                            }
+                        }
+                    }
+                }
+            } else if (anCount > 0) {
+                // Downlink response — extract A records and map to domain
+                val qname = pendingDnsQueries.remove(txId)
+                    ?: parseDnsQname(dnsData, 12)  // fallback: parse from response
+
+                if (qname == null) return
+
+                // Skip question section
+                var offset = 12
+                for (i in 0 until qdCount) {
+                    offset = skipDnsName(dnsData, offset)
+                    offset += 4  // QTYPE + QCLASS
+                }
+
+                // Parse answer section for A records
+                for (i in 0 until anCount) {
+                    if (offset >= dnsData.size) break
+                    offset = skipDnsName(dnsData, offset)
+                    if (offset + 10 > dnsData.size) break
+
+                    val rtype = ((dnsData[offset].toInt() and 0xFF) shl 8) or (dnsData[offset + 1].toInt() and 0xFF)
+                    val rdlength = ((dnsData[offset + 8].toInt() and 0xFF) shl 8) or (dnsData[offset + 9].toInt() and 0xFF)
+                    offset += 10
+
+                    if (rtype == 1 && rdlength == 4 && offset + 4 <= dnsData.size) {
+                        // A record — map IP to domain
+                        val ip = "${dnsData[offset].toInt() and 0xFF}.${dnsData[offset + 1].toInt() and 0xFF}." +
+                            "${dnsData[offset + 2].toInt() and 0xFF}.${dnsData[offset + 3].toInt() and 0xFF}"
+                        DomainCache.putDomain(ip, qname)
+                        dnsDomainsExtracted++
+                    }
+                    offset += rdlength
+                }
+            }
+        } catch (_: Exception) {
+            // Non-fatal — DNS parsing shouldn't crash the I/O thread
+        }
+    }
+
+    /** Parse DNS QNAME starting at offset. Returns domain string or null. */
+    private fun parseDnsQname(data: ByteArray, startOffset: Int): String? {
+        val labels = mutableListOf<String>()
+        var offset = startOffset
+        var jumped = false
+        var jumpLimit = 10
+
+        while (jumpLimit > 0) {
+            if (offset >= data.size) return null
+            val length = data[offset].toInt() and 0xFF
+            if (length == 0) break
+            if ((length and 0xC0) == 0xC0) {
+                // Pointer — follow it
+                if (offset + 1 >= data.size) return null
+                if (!jumped) jumped = true
+                offset = ((length and 0x3F) shl 8) or (data[offset + 1].toInt() and 0xFF)
+                jumpLimit--
+                continue
+            }
+            offset++
+            if (offset + length > data.size) return null
+            labels.add(String(data, offset, length, Charsets.US_ASCII))
+            offset += length
+        }
+        return if (labels.isEmpty()) null else labels.joinToString(".")
+    }
+
+    /** Skip a DNS name (may include pointers) and return offset after it. */
+    private fun skipDnsName(data: ByteArray, startOffset: Int): Int {
+        var offset = startOffset
+        while (offset < data.size) {
+            val length = data[offset].toInt() and 0xFF
+            if (length == 0) return offset + 1
+            if ((length and 0xC0) == 0xC0) return offset + 2  // pointer
+            offset += 1 + length
+        }
+        return offset
     }
 
     private fun ipToString(packet: ByteArray, offset: Int): String {
