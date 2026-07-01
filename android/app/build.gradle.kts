@@ -11,8 +11,8 @@ android {
         applicationId = "com.tunnely.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 93
-        versionName = "3.20.3"
+        versionCode = 94
+        versionName = "3.21.0"
     }
 
     signingConfigs {

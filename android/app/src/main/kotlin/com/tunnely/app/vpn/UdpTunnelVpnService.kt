@@ -7,6 +7,10 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -55,7 +59,18 @@ class UdpTunnelVpnService : VpnService() {
 
         private const val TUNNEL_PORT = 8770
         private const val TUNNEL_MTU = 1400  // Must be ≤ (ext_iface_MTU - 28 UDP overhead). GCP ens4=1460, so 1400 is safe.
-        private const val KEEPALIVE_INTERVAL = 15_000L // 15s
+
+        // Adaptive keepalive intervals
+        private const val KEEPALIVE_NORMAL = 5_000L      // 5s default
+        private const val KEEPALIVE_AGGRESSIVE = 2_000L  // 2s when flapping
+        private const val KEEPALIVE_IDLE = 15_000L       // 15s when no traffic (save battery)
+        private const val IDLE_THRESHOLD_MS = 60_000L    // 60s no traffic = idle
+        private const val COOLDOWN_MS = 30_000L          // Stay aggressive for 30s after failure
+
+        // Health check
+        private const val DEAD_CHECK_INTERVAL = 10_000L  // Check every 10s
+        private const val DEAD_THRESHOLD = 3             // 3 failures = force reconnect
+
         private const val MAX_PACKET = 32767
 
         // DNS handled server-side: server intercepts 10.0.2.3:53 and forwards to 8.8.8.8.
@@ -113,7 +128,11 @@ class UdpTunnelVpnService : VpnService() {
     }
 
     private var tunFd: ParcelFileDescriptor? = null
-    private var udpSocket: DatagramSocket? = null
+
+    // Atomic socket access — I/O threads read via getSocket(), rebind atomically swaps
+    @Volatile private var udpSocket: DatagramSocket? = null
+    private val socketLock = Object()  // Only for rebind synchronization
+
     private var downThread: Thread? = null   // TUN → UDP
     private var upThread: Thread? = null     // UDP → TUN
     private var monitorThread: Thread? = null
@@ -125,6 +144,18 @@ class UdpTunnelVpnService : VpnService() {
     @Volatile private var totalTx: Long = 0
     @Volatile private var lastPacketTime: Long = 0
     private var connectTime: Long = 0
+
+    // Network resilience
+    private var connectivityManager: ConnectivityManager? = null
+    @Volatile private var currentNetwork: Network? = null
+
+    // Adaptive keepalive state
+    @Volatile private var consecutiveFailures: Long = 0
+    @Volatile private var lastFailureTime: Long = 0
+    @Volatile private var lastNetworkSwitchTime: Long = 0
+
+    // Health check state
+    @Volatile private var consecutiveDeadChecks: Int = 0
 
     // Latency probe state
     @Volatile private var probeSeq: Int = 0
@@ -142,6 +173,93 @@ class UdpTunnelVpnService : VpnService() {
         RemoteLogger.i(TAG, "🟠 onCreate()")
         serviceInstance = this
         createNotificationChannel()
+    }
+
+    // ── Network Resilience ──────────────────────────────────────────────────
+
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            if (!running) return
+            val oldNetwork = currentNetwork
+            if (oldNetwork != null && oldNetwork != network) {
+                RemoteLogger.i(TAG, "🌐 Network changed! Rebinding socket...")
+                lastNetworkSwitchTime = System.currentTimeMillis()
+                rebindSocket(network)
+            }
+            currentNetwork = network
+        }
+
+        override fun onLost(network: Network) {
+            if (!running) return
+            RemoteLogger.w(TAG, "🌐 Network lost! Attempting rebind to default...")
+            currentNetwork = null
+            // Don't rebind immediately — wait for onAvailable with new network
+            // If no new network comes in 5s, monitor thread will detect dead connection
+        }
+
+        override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+            if (!running) return
+            currentNetwork = network
+        }
+    }
+
+    /**
+     * Rebind UDP socket to new network. Thread-safe atomic swap.
+     *
+     * Concern #1 from review: Race condition if I/O thread reads socket while we close it.
+     * Solution: Create NEW socket first, then atomically swap the reference.
+     * Old socket stays alive until GC collects it (I/O threads hold local refs).
+     *
+     * Concern #2: Server session continuity on IP change.
+     * Server dedup by client IP (client_ip_map). When IP changes, server creates new session
+     * automatically on next packet. sendHello() triggers this. Old session expires via
+     * IDLE_TIMEOUT=60s. TCP connections on old session die — acceptable for mobile handover.
+     */
+    private fun rebindSocket(newNetwork: Network) {
+        try {
+            val addr = serverAddr ?: return
+            val port = serverPort
+            if (port <= 0) return
+
+            // Step 1: Create new socket FIRST (before closing old one)
+            val newSocket = DatagramSocket()
+            newSocket.soTimeout = 5000
+
+            // Step 2: Protect from VPN routing loop
+            if (!protect(newSocket)) {
+                RemoteLogger.e(TAG, "Failed to protect new socket!")
+                newSocket.close()
+                return
+            }
+
+            // Step 3: Bind to specific network (API 21+)
+            newNetwork.bindSocket(newSocket)
+
+            // Step 4: Atomic swap — I/O threads see new socket immediately
+            synchronized(socketLock) {
+                val oldSocket = udpSocket
+                udpSocket = newSocket
+                // Close old socket AFTER swap — I/O threads that already got the ref
+                // will get SocketException on next operation, which they handle with retry
+                oldSocket?.close()
+            }
+
+            // Step 5: Send hello on new socket so server learns our new source IP/port
+            val hello = ByteBuffer.allocate(4).putInt(0x54554E4E).array()
+            newSocket.send(DatagramPacket(hello, hello.size, addr, port))
+
+            // Reset failure counters
+            consecutiveFailures = 0
+            consecutiveDeadChecks = 0
+            lastPacketTime = System.currentTimeMillis()
+
+            RemoteLogger.i(TAG, "🌐 Socket rebound to new network! Hello sent.")
+            updateNotification("Reconnected ✓")
+
+        } catch (e: Exception) {
+            RemoteLogger.e(TAG, "🌐 Rebind failed: ${e.message}", e)
+            consecutiveFailures++
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -214,6 +332,15 @@ class UdpTunnelVpnService : VpnService() {
                 throw Exception("Failed to protect UDP socket — VPN cannot start")
             }
             RemoteLogger.i(TAG, "Step 2: ✅ UDP socket protected + bound")
+
+            // Step 2b: Register network callback for handover detection
+            connectivityManager = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            connectivityManager?.registerNetworkCallback(request, networkCallback)
+            currentNetwork = connectivityManager?.activeNetwork
+            RemoteLogger.i(TAG, "Step 2b: ✅ Network callback registered")
 
             // Step 3: Establish TUN interface
             RemoteLogger.i(TAG, "Step 3: Building TUN interface...")
@@ -330,7 +457,6 @@ class UdpTunnelVpnService : VpnService() {
             val input = FileInputStream(pfd.fileDescriptor)
             val buf = ByteArray(MAX_PACKET)
             val outPkt = DatagramPacket(buf, 0, serverAddr, serverPort)
-            val sock = udpSocket ?: return@Thread
 
             RemoteLogger.i(TAG, "↓ TUN→UDP thread started")
             while (running && !Thread.interrupted()) {
@@ -341,6 +467,13 @@ class UdpTunnelVpnService : VpnService() {
                     // Track flow
                     PacketFlowTracker.processPacket(buf.copyOf(n), isUplink = true)
 
+                    // Read volatile socket ref each iteration (safe during rebind)
+                    val sock = udpSocket
+                    if (sock == null || sock.isClosed) {
+                        Thread.sleep(100)  // Wait for rebind
+                        continue
+                    }
+
                     outPkt.length = n
                     sock.send(outPkt)
 
@@ -348,6 +481,10 @@ class UdpTunnelVpnService : VpnService() {
                     lastPacketTime = System.currentTimeMillis()
                 } catch (e: java.net.PortUnreachableException) {
                     // Server not ready yet, retry
+                } catch (e: java.net.SocketException) {
+                    // Socket closed during rebind — retry with new socket
+                    if (!running) break
+                    Thread.sleep(50)
                 } catch (e: java.io.IOException) {
                     if (!running) break
                     RemoteLogger.w(TAG, "↓ TUN read error: ${e.message}, retrying...")
@@ -374,11 +511,17 @@ class UdpTunnelVpnService : VpnService() {
             val output = FileOutputStream(pfd.fileDescriptor)
             val buf = ByteArray(MAX_PACKET)
             val pkt = DatagramPacket(buf, buf.size)
-            val sock = udpSocket ?: return@Thread
 
             RemoteLogger.i(TAG, "↑ UDP→TUN thread started")
             while (running && !Thread.interrupted()) {
                 try {
+                    // Read volatile socket ref each iteration (safe during rebind)
+                    val sock = udpSocket
+                    if (sock == null || sock.isClosed) {
+                        Thread.sleep(100)  // Wait for rebind
+                        continue
+                    }
+
                     sock.receive(pkt)
                     val n = pkt.length
                     if (n <= 0) continue
@@ -435,6 +578,10 @@ class UdpTunnelVpnService : VpnService() {
                 } catch (e: java.net.SocketTimeoutException) {
                     // Normal — just means no data for 5s
                     continue
+                } catch (e: java.net.SocketException) {
+                    // Socket closed during rebind — retry with new socket
+                    if (!running) break
+                    Thread.sleep(50)
                 } catch (e: java.io.IOException) {
                     if (!running) break
                     RemoteLogger.w(TAG, "↑ TUN write error: ${e.message}, retrying...")
@@ -452,28 +599,57 @@ class UdpTunnelVpnService : VpnService() {
     }
 
     /**
-     * Thread 3: Monitor — keepalive, stats, health checks
+     * Thread 3: Monitor — adaptive keepalive, stats, health checks
+     *
+     * Adaptive keepalive (Concern #3: cooldown prevents oscillation):
+     *   - Normal: 5s when connected and active
+     *   - Aggressive: 2s after failure or network switch (stays for COOLDOWN_MS=30s)
+     *   - Idle: 15s when no traffic for 60s (save battery)
+     *
+     * Health check (Concern #4: lastPacketTime updated from BOTH receive AND send threads):
+     *   - Check every 10s: is lastPacketTime within 10s?
+     *   - 3 consecutive dead checks (30s) → force reconnect
      */
     private fun startMonitorThread() {
         monitorThread = Thread({
             RemoteLogger.i(TAG, "◉ Monitor thread started")
-            val keepaliveBuf = ByteBuffer.allocate(4).putInt(0x54554E4E).array() // "TUNN" magic (same as hello)
+            val keepaliveBuf = ByteBuffer.allocate(4).putInt(0x54554E4E).array() // "TUNN" magic
+            var lastHealthCheckMs = System.currentTimeMillis()
 
             while (running && !Thread.interrupted()) {
                 try {
-                    // Send keepalive FIRST (don't delay — NAT mapping may expire)
+                    // Determine keepalive interval based on state
+                    val nowMs = System.currentTimeMillis()
+                    val timeSinceTraffic = nowMs - lastPacketTime
+                    val timeSinceFailure = nowMs - lastFailureTime
+                    val timeSinceNetworkSwitch = nowMs - lastNetworkSwitchTime
+
+                    val keepaliveInterval = when {
+                        // Aggressive: recent failure or network switch (stay for COOLDOWN)
+                        timeSinceFailure < COOLDOWN_MS || timeSinceNetworkSwitch < COOLDOWN_MS ->
+                            KEEPALIVE_AGGRESSIVE
+                        // Idle: no traffic for a while
+                        timeSinceTraffic > IDLE_THRESHOLD_MS ->
+                            KEEPALIVE_IDLE
+                        // Normal
+                        else -> KEEPALIVE_NORMAL
+                    }
+
+                    // Send keepalive
                     val sock = udpSocket
                     val addr = serverAddr
                     val port = serverPort
                     if (sock != null && addr != null && port > 0 && running) {
                         try {
                             sock.send(DatagramPacket(keepaliveBuf, keepaliveBuf.size, addr, port))
+                            consecutiveFailures = 0  // keepalive sent OK
                         } catch (e: Exception) {
                             RemoteLogger.w(TAG, "Keepalive send failed: ${e.message}")
+                            consecutiveFailures++
+                            lastFailureTime = nowMs
                         }
 
-                        // Send latency probe (every 5s, separate from 15s keepalive)
-                        val nowMs = System.currentTimeMillis()
+                        // Send latency probe (every 5s, separate from keepalive)
                         if (running && nowMs - lastProbeSentMs >= LatencyProber.PROBE_INTERVAL_MS) {
                             try {
                                 val nowUs = LatencyProber.nowMicros()
@@ -501,9 +677,12 @@ class UdpTunnelVpnService : VpnService() {
                         }
                     }
 
-                    // Sleep in 5s chunks to allow probe timing (not 15s keepalive block)
-                    // Keepalive is sent every iteration (every 5s) — cheap UDP packet
-                    Thread.sleep(LatencyProber.PROBE_INTERVAL_MS)
+                    // Sleep for adaptive interval (chunk into 1s pieces for responsiveness)
+                    var slept = 0L
+                    while (slept < keepaliveInterval && running && !Thread.interrupted()) {
+                        Thread.sleep(minOf(1000L, keepaliveInterval - slept))
+                        slept += 1000L
+                    }
 
                     // Update traffic stats
                     _trafficStats.value = TrafficStats(
@@ -513,16 +692,39 @@ class UdpTunnelVpnService : VpnService() {
 
                     // Update health
                     val idleSecs = (System.currentTimeMillis() - lastPacketTime) / 1000
-                    val uptimeSecs = (System.currentTimeMillis() - connectTime) / 1000
                     _connectionHealth.value = _connectionHealth.value.copy(
                         handshakeAge = if (totalRx > 0 || totalTx > 0) idleSecs else -1,
                         transferRx = totalRx,
                         transferTx = totalTx
                     )
 
-                    // Check for dead connection (no traffic for 60s)
-                    if (idleSecs > 60 && totalRx == 0L) {
-                        RemoteLogger.w(TAG, "No traffic for ${idleSecs}s, may be disconnected")
+                    // Health check: detect dead connection
+                    val nowForCheck = System.currentTimeMillis()
+                    if (nowForCheck - lastHealthCheckMs >= DEAD_CHECK_INTERVAL) {
+                        lastHealthCheckMs = nowForCheck
+                        val timeSincePacket = nowForCheck - lastPacketTime
+                        if (timeSincePacket > 10_000 && (totalRx > 0 || totalTx > 0)) {
+                            consecutiveDeadChecks++
+                            RemoteLogger.w(TAG, "◉ Dead check: ${consecutiveDeadChecks}/${DEAD_THRESHOLD} " +
+                                "(no traffic for ${timeSincePacket / 1000}s)")
+                            if (consecutiveDeadChecks >= DEAD_THRESHOLD) {
+                                RemoteLogger.e(TAG, "◉ Connection dead for ${DEAD_THRESHOLD * 10}s! " +
+                                    "Attempting rebind...")
+                                consecutiveDeadChecks = 0
+                                // Try to rebind to current network
+                                val network = currentNetwork
+                                if (network != null) {
+                                    rebindSocket(network)
+                                } else {
+                                    RemoteLogger.e(TAG, "◉ No network available! Waiting...")
+                                }
+                            }
+                        } else {
+                            if (consecutiveDeadChecks > 0) {
+                                RemoteLogger.i(TAG, "◉ Connection recovered!")
+                            }
+                            consecutiveDeadChecks = 0
+                        }
                     }
                 } catch (e: InterruptedException) {
                     break
@@ -542,6 +744,13 @@ class UdpTunnelVpnService : VpnService() {
         running = false
         _vpnState.value = VpnState.DISCONNECTING
 
+        // Unregister network callback
+        try {
+            connectivityManager?.unregisterNetworkCallback(networkCallback)
+        } catch (_: Exception) {}
+        connectivityManager = null
+        currentNetwork = null
+
         // Stop threads
         downThread?.interrupt()
         upThread?.interrupt()
@@ -559,6 +768,12 @@ class UdpTunnelVpnService : VpnService() {
         udpSocket = null
         serverAddr = null
         serverPort = 0
+
+        // Reset resilience state
+        consecutiveFailures = 0
+        consecutiveDeadChecks = 0
+        lastFailureTime = 0
+        lastNetworkSwitchTime = 0
 
         _vpnState.value = VpnState.DISCONNECTED
         _trafficStats.value = TrafficStats()
