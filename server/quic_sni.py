@@ -148,19 +148,25 @@ def _parse_quic_header(data: bytes) -> Optional[dict]:
     pos += 4
 
     # Destination Connection ID
+    if pos >= len(data):
+        return None
     dcid_len = data[pos]; pos += 1
-    if dcid_len > 20:
+    if dcid_len > 20 or pos + dcid_len > len(data):
         return None
     dcid = data[pos:pos+dcid_len]; pos += dcid_len
 
     # Source Connection ID
+    if pos >= len(data):
+        return None
     scid_len = data[pos]; pos += 1
-    if scid_len > 20:
+    if scid_len > 20 or pos + scid_len > len(data):
         return None
     scid = data[pos:pos+scid_len]; pos += scid_len
 
     # Token (Initial packets only)
     token_len, pos = _read_varint(data, pos)
+    if pos + token_len > len(data):
+        return None
     token = data[pos:pos+token_len]; pos += token_len
 
     # Length (protected payload + packet number)
