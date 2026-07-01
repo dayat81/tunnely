@@ -35,14 +35,14 @@ from ntp_sync import NtpSync
 
 # QUIC SNI extraction
 try:
-    from quic_sni import extract_quic_sni, is_quic_initial
+    from quic_sni import extract_quic_sni, is_quic_initial, _parse_quic_header
     QUIC_SNI_AVAILABLE = True
 except ImportError:
     QUIC_SNI_AVAILABLE = False
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
-__version__ = "3.20.3"
+__version__ = "3.24.2"
 
 TUNSETIFF = 0x400454CA
 IFF_TUN = 0x0001
@@ -790,6 +790,9 @@ class UdpVpnServer:
 
     # QUIC SNI tracking (UDP port 443)
     _quic_sni_cache = {}  # dst_ip -> domain (dedup, avoid re-parsing)
+    _quic_initial_seen = 0  # total QUIC Initial packets seen
+    _quic_sni_extracted = 0  # successful QUIC SNI extractions
+    _quic_sni_failed = 0  # failed QUIC SNI extractions (Initial but no SNI)
 
     def _track_quic_sni(self, data: bytes, client_ip: str, dst_ip: str):
         """Extract SNI from QUIC Initial packets (UDP :443)."""
@@ -808,8 +811,10 @@ class UdpVpnServer:
         if not is_quic_initial(udp_payload):
             return
 
+        self._quic_initial_seen += 1
         sni = extract_quic_sni(udp_payload)
         if sni:
+            self._quic_sni_extracted += 1
             self._quic_sni_cache[dst_ip] = sni
             # Add to tcp_tracker so it appears in sni_domain_map
             if client_ip not in self._tcp_tracker:
@@ -822,6 +827,14 @@ class UdpVpnServer:
             if len(self._tls_sni_log) > 50:
                 self._tls_sni_log.pop(0)
             log(f"  [QUIC] {client_ip}→{dst_ip}:443 SNI={sni}")
+        else:
+            # Debug: log failed QUIC extraction (sampled 1/5)
+            if self._quic_initial_seen % 5 == 1:
+                hdr = _parse_quic_header(udp_payload)
+                if hdr:
+                    log(f"  [QUIC-FAIL] {dst_ip} ver=0x{hdr['version']:08x} dcid={hdr['dcid'].hex()[:8]}.. len={len(udp_payload)}")
+                else:
+                    log(f"  [QUIC-FAIL] {dst_ip} len={len(udp_payload)} hdr=None")
 
     def _extract_sni_from_payload(self, data: bytes, ch_offset: int) -> str:
         """Extract SNI from TLS ClientHello at given offset."""
@@ -876,7 +889,7 @@ class UdpVpnServer:
         return None
 
     def get_tcp_debug_summary(self) -> dict:
-        """Get summary of TCP/TLS flows for HTTP stats."""
+        """Get summary of TCP/TLS/QUIC flows for HTTP stats."""
         total_tls = 0
         total_sni = 0
         recent_snis = list(self._tls_sni_log[-10:])
@@ -892,12 +905,28 @@ class UdpVpnServer:
                     colon_idx = flow_key.rfind(':')
                     remote_ip = flow_key[:colon_idx] if colon_idx > 0 else flow_key
                     sni_domain_map[remote_ip] = flow["sni"]
+
+        # QUIC SNI data
+        quic_sni_count = len(self._quic_sni_cache)
+        quic_sni_map = dict(self._quic_sni_cache)
+
+        # Combined: TCP + QUIC domain maps
+        combined_map = {**sni_domain_map, **quic_sni_map}
+        combined_sni = len(combined_map)
+
         return {
             "tcp_flows": sum(len(f) for f in self._tcp_tracker.values()),
             "tls_handshakes": total_tls,
             "sni_domains": total_sni,
             "recent_snis": recent_snis,
             "sni_domain_map": sni_domain_map,
+            "quic_initial_seen": self._quic_initial_seen,
+            "quic_sni_extracted": self._quic_sni_extracted,
+            "quic_sni_failed": self._quic_initial_seen - self._quic_sni_extracted,
+            "quic_sni_domains": quic_sni_count,
+            "quic_sni_map": quic_sni_map,
+            "combined_sni_domains": combined_sni,
+            "combined_sni_map": combined_map,
         }
 
     def _forward_dns(self, packet: bytes, orig_dns_ip: str, client_ip: str, client_addr):
