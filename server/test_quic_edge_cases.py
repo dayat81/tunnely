@@ -69,9 +69,10 @@ def _build_roundtrip_packet(domain, dcid_len=8, scid_len=4,
     plaintext = crypto_frame + b'\x00' * max(0, 1200 - len(crypto_frame) - 16)
 
     initial_secret = _hkdf_extract(INITIAL_SALT_V1, dcid)
-    client_key = _hkdf_expand_label(initial_secret, "quic key", b"", 16)
-    client_iv = _hkdf_expand_label(initial_secret, "quic iv", b"", 12)
-    client_hp = _hkdf_expand_label(initial_secret, "quic hp", b"", 16)
+    client_initial_secret = _hkdf_expand_label(initial_secret, "client in", b"", 32)
+    client_key = _hkdf_expand_label(client_initial_secret, "quic key", b"", 16)
+    client_iv = _hkdf_expand_label(client_initial_secret, "quic iv", b"", 12)
+    client_hp = _hkdf_expand_label(client_initial_secret, "quic hp", b"", 16)
 
     pn_len = pn_length
     nonce = bytearray(client_iv)

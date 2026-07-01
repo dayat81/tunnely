@@ -196,10 +196,13 @@ def _decrypt_initial(data: bytes, header: dict) -> Optional[bytes]:
     # Step 1: Derive initial_secret from DCID
     initial_secret = _hkdf_extract(salt, dcid)
 
-    # Step 2: Derive keys
-    client_key = _hkdf_expand_label(initial_secret, "quic key", b"", 16)
-    client_iv = _hkdf_expand_label(initial_secret, "quic iv", b"", 12)
-    client_hp = _hkdf_expand_label(initial_secret, "quic hp", b"", 16)
+    # Step 2: Derive client_initial_secret (RFC 9001 Section 5.2 — THIS STEP WAS MISSING!)
+    client_initial_secret = _hkdf_expand_label(initial_secret, "client in", b"", 32)
+
+    # Step 3: Derive keys from client_initial_secret
+    client_key = _hkdf_expand_label(client_initial_secret, "quic key", b"", 16)
+    client_iv = _hkdf_expand_label(client_initial_secret, "quic iv", b"", 12)
+    client_hp = _hkdf_expand_label(client_initial_secret, "quic hp", b"", 16)
 
     header_end = header["header_end"]
     # Use pn_length_hint only for initial sampling (sample is always at header_end + 4)

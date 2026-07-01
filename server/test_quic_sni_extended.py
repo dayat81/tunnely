@@ -74,11 +74,12 @@ def _build_encrypted_quic_initial(
     salt = INITIAL_SALT_V1 if version != QUIC_V2 else bytes.fromhex(
         "a707c203a59b47184317ef6f70b64a1e76ab5765")
 
-    # Derive keys
+    # Derive keys (RFC 9001 Section 5.2 — must go through "client in" first)
     initial_secret = _hkdf_extract(salt, dcid)
-    key = _hkdf_expand_label(initial_secret, "quic key", b"", 16)
-    iv = _hkdf_expand_label(initial_secret, "quic iv", b"", 12)
-    hp = _hkdf_expand_label(initial_secret, "quic hp", b"", 16)
+    client_initial_secret = _hkdf_expand_label(initial_secret, "client in", b"", 32)
+    key = _hkdf_expand_label(client_initial_secret, "quic key", b"", 16)
+    iv = _hkdf_expand_label(client_initial_secret, "quic iv", b"", 12)
+    hp = _hkdf_expand_label(client_initial_secret, "quic hp", b"", 16)
 
     # Build TLS ClientHello → CRYPTO frame → payload
     ch = _build_tls_client_hello(sni)
