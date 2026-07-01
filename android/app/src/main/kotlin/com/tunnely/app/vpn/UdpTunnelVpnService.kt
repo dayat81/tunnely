@@ -79,6 +79,7 @@ class UdpTunnelVpnService : VpnService() {
             val uplinkMs: Float = 0f,
             val downlinkMs: Float = 0f,
             val rttMs: Float = 0f,
+            val clockOffsetMs: Float = 0f,  // NTP clock offset (for debugging)
             val probesSent: Long = 0,
             val probesRecv: Long = 0,
         )
@@ -522,19 +523,26 @@ class UdpTunnelVpnService : VpnService() {
                             val nowUs = LatencyProber.nowMicros()
                             val sentUs = probeSentTimes.remove(probe.sequence)
                             if (sentUs != null) {
-                                val rttUs = nowUs - sentUs
-                                // Server processing = server_echo - server_recv (same machine clock)
-                                val serverProcUs = (probe.serverEchoTs - probe.serverRecvTs).coerceAtLeast(0)
-                                // Network RTT = total RTT - server processing
-                                val networkRttUs = (rttUs - serverProcUs).coerceAtLeast(0)
-                                // Estimate: uplink ≈ downlink ≈ network_rtt / 2
-                                val uplinkUs = networkRttUs / 2
-                                val downlinkUs = networkRttUs / 2
+                                val nowUs2 = nowUs  // T4: client receive time
+                                val t1 = sentUs              // T1: client send time
+                                val t2 = probe.serverRecvTs  // T2: server receive time
+                                val t3 = probe.serverEchoTs  // T3: server echo time
+                                val t4 = nowUs2              // T4: client receive time
+
+                                // NTP clock offset: ((T2-T1) + (T3-T4)) / 2
+                                // Positive = server clock is ahead of client
+                                val clockOffsetUs = ((t2 - t1) + (t3 - t4)) / 2
+
+                                // True one-way delays (corrected for clock offset)
+                                val uplinkUs = (t2 - t1) - clockOffsetUs   // client → server
+                                val downlinkUs = (t4 - t3) + clockOffsetUs // server → client
+                                val rttUs = uplinkUs + downlinkUs          // should equal t4 - t1 - serverProc
 
                                 probesRecv++
                                 val rttMs = rttUs / 1000f
                                 val uplinkMs = uplinkUs / 1000f
                                 val downlinkMs = downlinkUs / 1000f
+                                val clockOffsetMs = clockOffsetUs / 1000f
 
                                 if (emaRtt == 0f) {
                                     emaRtt = rttMs; emaUplink = uplinkMs; emaDownlink = downlinkMs
@@ -548,6 +556,7 @@ class UdpTunnelVpnService : VpnService() {
                                     uplinkMs = emaUplink,
                                     downlinkMs = emaDownlink,
                                     rttMs = emaRtt,
+                                    clockOffsetMs = clockOffsetMs,
                                     probesSent = probesSent,
                                     probesRecv = probesRecv,
                                 )
