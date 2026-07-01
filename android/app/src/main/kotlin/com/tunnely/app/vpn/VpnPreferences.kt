@@ -14,7 +14,7 @@ class VpnPreferences(context: Context) {
         set(value) = prefs.edit().putString("server_address", value).apply()
 
     var serverPort: Int
-        get() = prefs.getInt("server_port", 51820)
+        get() = prefs.getInt("server_port", 8770)
         set(value) = prefs.edit().putInt("server_port", value).apply()
 
     var dnsServers: String

@@ -20,7 +20,7 @@ data class VpnRegistration(
 
 class ApiClient(
     private val serverAddress: String = "tunnely.site",
-    private val serverPort: Int = 51820
+    private val serverPort: Int = 8770
 ) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
