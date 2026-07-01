@@ -428,5 +428,211 @@ class TestDnsResponseEdgeCases(unittest.TestCase):
         self.assertEqual(result, ["5.6.7.8"])
 
 
+class TestDnsCacheEdgeCases(unittest.TestCase):
+    """Additional edge case tests for DNS cache."""
+
+    def test_a_record_with_zero_ip(self):
+        """A record with 0.0.0.0 (NXDOMAIN style)."""
+        data = build_dns_response([("blocked.com", "0.0.0.0")])
+        result = UdpVpnServer._parse_dns_a_records(data)
+        self.assertEqual(result, ["0.0.0.0"])
+
+    def test_a_record_with_broadcast_ip(self):
+        data = build_dns_response([("broadcast.local", "255.255.255.255")])
+        result = UdpVpnServer._parse_dns_a_records(data)
+        self.assertEqual(result, ["255.255.255.255"])
+
+    def test_a_record_with_class_e_ip(self):
+        """Class E experimental IP (240.0.0.1)."""
+        data = build_dns_response([("experimental.test", "240.0.0.1")])
+        result = UdpVpnServer._parse_dns_a_records(data)
+        self.assertEqual(result, ["240.0.0.1"])
+
+    def test_response_with_10_a_records(self):
+        """Large number of A records."""
+        answers = [("cdn.test.com", f"10.0.{i//256}.{i%256}") for i in range(10)]
+        data = build_dns_response(answers)
+        result = UdpVpnServer._parse_dns_a_records(data)
+        self.assertEqual(len(result), 10)
+
+    def test_pointer_to_end_of_packet(self):
+        """Pointer that points beyond packet boundary."""
+        header = struct.pack('!HHHHHH', 0x1234, 0x8180, 0, 1, 0, 0)
+        # Answer with pointer to offset 200 (beyond packet)
+        answer = b'\xc0\xc8'  # pointer to offset 200
+        answer += struct.pack('!HHIH', 1, 1, 300, 4)
+        answer += socket.inet_aton("1.2.3.4")
+        data = header + answer
+        # Should not crash
+        result = UdpVpnServer._parse_dns_a_records(data)
+        # May return empty or partial — just no crash
+        self.assertIsInstance(result, list)
+
+    def test_answer_with_long_rdlength(self):
+        """RDLENGTH larger than remaining data."""
+        header = struct.pack('!HHHHHH', 0x1234, 0x8180, 0, 1, 0, 0)
+        answer = b'\xc0\x0c'  # pointer to qname
+        answer += struct.pack('!HHIH', 1, 1, 300, 9999)  # RDLENGTH=9999 but no data
+        data = header + answer
+        result = UdpVpnServer._parse_dns_a_records(data)
+        self.assertEqual(result, [])  # Should handle gracefully
+
+    def test_dns_map_combined_priority(self):
+        """Combined map: QUIC > TCP > DNS (later overwrites earlier)."""
+        srv = UdpVpnServer.__new__(UdpVpnServer)
+        srv._tcp_tracker = {}
+        srv._quic_sni_cache = {"1.2.3.4": "quic.example.com"}
+        srv._tls_sni_log = []
+        srv._quic_initial_seen = 1
+        srv._quic_sni_extracted = 1
+        srv.dns_ip_map = {"1.2.3.4": "dns.example.com", "5.6.7.8": "dns-only.com"}
+
+        summary = srv.get_tcp_debug_summary()
+
+        # QUIC wins over DNS for same IP
+        self.assertEqual(summary["combined_sni_map"]["1.2.3.4"], "quic.example.com")
+        # DNS-only IP preserved
+        self.assertEqual(summary["combined_sni_map"]["5.6.7.8"], "dns-only.com")
+        # DNS count
+        self.assertEqual(summary["dns_domains"], 2)
+
+    def test_dns_enriches_tcp_flows_multiple(self):
+        """Multiple TCP flows get enriched from DNS cache."""
+        srv = UdpVpnServer.__new__(UdpVpnServer)
+        srv._tcp_tracker = {
+            "10.20.0.2": {
+                "142.251.12.100:443": {"syn": 1, "established": True, "tls_hello": 1, "sni": None},
+                "142.251.12.101:443": {"syn": 1, "established": True, "tls_hello": 1, "sni": None},
+                "142.251.12.102:80": {"syn": 1, "established": True, "tls_hello": 0, "sni": None},
+            }
+        }
+        srv._quic_sni_cache = {}
+        srv._tls_sni_log = []
+        srv._quic_initial_seen = 0
+        srv._quic_sni_extracted = 0
+        srv.dns_ip_map = {
+            "142.251.12.100": "google.com",
+            "142.251.12.101": "google.com",
+            "142.251.12.102": "google.com",
+        }
+
+        summary = srv.get_tcp_debug_summary()
+        self.assertEqual(summary["dns_enriched"], 3)
+
+    def test_dns_map_empty(self):
+        """Empty DNS map should not affect combined map."""
+        srv = UdpVpnServer.__new__(UdpVpnServer)
+        srv._tcp_tracker = {}
+        srv._quic_sni_cache = {"1.2.3.4": "test.com"}
+        srv._tls_sni_log = []
+        srv._quic_initial_seen = 1
+        srv._quic_sni_extracted = 1
+        srv.dns_ip_map = {}
+
+        summary = srv.get_tcp_debug_summary()
+        self.assertEqual(summary["dns_domains"], 0)
+        self.assertEqual(summary["combined_sni_domains"], 1)
+
+    def test_dns_map_large_scale(self):
+        """DNS map with 1000 entries — should not slow down summary."""
+        srv = UdpVpnServer.__new__(UdpVpnServer)
+        srv._tcp_tracker = {}
+        srv._quic_sni_cache = {}
+        srv._tls_sni_log = []
+        srv._quic_initial_seen = 0
+        srv._quic_sni_extracted = 0
+        srv.dns_ip_map = {f"10.0.{i//256}.{i%256}": f"domain{i}.com" for i in range(1000)}
+
+        import time
+        start = time.time()
+        summary = srv.get_tcp_debug_summary()
+        elapsed = time.time() - start
+
+        self.assertEqual(summary["dns_domains"], 1000)
+        self.assertEqual(summary["combined_sni_domains"], 1000)
+        self.assertLess(elapsed, 0.1)  # Should be fast (<100ms)
+
+    def test_dns_query_name_with_underscore(self):
+        """Domain with underscore (valid in DNS)."""
+        data = build_dns_response([("_sip._tcp.example.com", "1.2.3.4")], "_sip._tcp.example.com")
+        result = UdpVpnServer._parse_dns_qname(data, 12)
+        self.assertEqual(result, "_sip._tcp.example.com")
+
+    def test_dns_query_name_single_char_labels(self):
+        data = build_dns_response([], "a.b.c.d.e.f.g.h.i.j.example.com")
+        result = UdpVpnServer._parse_dns_qname(data, 12)
+        self.assertEqual(result, "a.b.c.d.e.f.g.h.i.j.example.com")
+
+    def test_dns_a_record_loopback(self):
+        data = build_dns_response([("localhost", "127.0.0.1")])
+        result = UdpVpnServer._parse_dns_a_records(data)
+        self.assertEqual(result, ["127.0.0.1"])
+
+    def test_dns_a_record_api_gateway(self):
+        """Real-world: AWS API Gateway style."""
+        data = build_dns_response([("execute-api.us-east-1.amazonaws.com", "52.84.125.37")])
+        result = UdpVpnServer._parse_dns_a_records(data)
+        self.assertEqual(result, ["52.84.125.37"])
+
+    def test_dns_a_record_cdn_multi(self):
+        """Real-world: CDN with multiple A records."""
+        answers = [
+            ("cdn.cloudflare.com", f"104.16.{i}.100") for i in range(8)
+        ]
+        data = build_dns_response(answers)
+        result = UdpVpnServer._parse_dns_a_records(data)
+        self.assertEqual(len(result), 8)
+
+    def test_dns_response_with_additional_section(self):
+        """Response with additional records (e.g., OPT)."""
+        header = struct.pack('!HHHHHH', 0x1234, 0x8180, 1, 1, 0, 1)  # 1 additional
+        question = b''
+        for label in "example.com".split('.'):
+            question += bytes([len(label)]) + label.encode()
+        question += b'\x00\x00\x01\x00\x01'
+
+        # Answer
+        answer = b'\xc0\x0c'
+        answer += struct.pack('!HHIH', 1, 1, 300, 4)
+        answer += socket.inet_aton("1.2.3.4")
+
+        # Additional: OPT record (type 41)
+        additional = b'\x00'  # root
+        additional += struct.pack('!HHIH', 41, 4096, 0, 0)  # OPT, UDP size=4096
+
+        data = header + question + answer + additional
+        result = UdpVpnServer._parse_dns_a_records(data)
+        self.assertEqual(result, ["1.2.3.4"])
+
+    def test_dns_response_authority_only(self):
+        """Response with authority records but no answer A records."""
+        header = struct.pack('!HHHHHH', 0x1234, 0x8180, 1, 0, 1, 0)  # 0 answers, 1 authority
+        question = b''
+        for label in "example.com".split('.'):
+            question += bytes([len(label)]) + label.encode()
+        question += b'\x00\x00\x01\x00\x01'
+
+        # Authority: NS record
+        auth = b'\xc0\x0c'
+        auth += struct.pack('!HHIH', 2, 1, 300, 4)  # NS record
+        auth += socket.inet_aton("198.41.0.4")
+
+        data = header + question + auth
+        result = UdpVpnServer._parse_dns_a_records(data)
+        self.assertEqual(result, [])  # NS record should not be extracted
+
+    def test_dns_qname_jump_loop_protection(self):
+        """Pointer loop should not infinite loop."""
+        # Create a packet with pointer loop: offset 12 → offset 14 → offset 12
+        data = bytearray(20)
+        data[12] = 0xC0  # pointer
+        data[13] = 0x0E  # → offset 14
+        data[14] = 0xC0  # pointer
+        data[15] = 0x0C  # → offset 12 (loop!)
+        result = UdpVpnServer._parse_dns_qname(bytes(data), 12)
+        # Should return None or partial, not hang
+        self.assertIsInstance(result, (str, type(None)))
+
+
 if __name__ == '__main__':
     unittest.main()
