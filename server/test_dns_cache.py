@@ -179,6 +179,8 @@ class TestDnsIpMap(unittest.TestCase):
     def test_dns_response_populates_map(self):
         """Simulate: DNS query for instagram.com → response with A records → dns_ip_map populated."""
         srv = UdpVpnServer.__new__(UdpVpnServer)
+        srv._ptr_cache = {}
+        srv._ptr_pending = set()
         srv.dns_ip_map = {}
         srv.dns_query_names = {}
         srv.dns_tracks = {}
@@ -207,6 +209,8 @@ class TestDnsIpMap(unittest.TestCase):
     def test_dns_map_cap(self):
         """dns_ip_map should not grow unbounded."""
         srv = UdpVpnServer.__new__(UdpVpnServer)
+        srv._ptr_cache = {}
+        srv._ptr_pending = set()
         srv.dns_ip_map = {}
 
         # Fill to just under limit
@@ -224,6 +228,8 @@ class TestDnsIpMap(unittest.TestCase):
     def test_dns_fallback_for_quic(self):
         """When QUIC SNI extraction fails, DNS map should be used as fallback."""
         srv = UdpVpnServer.__new__(UdpVpnServer)
+        srv._ptr_cache = {}
+        srv._ptr_pending = set()
         srv.dns_ip_map = {"57.144.144.1": "instagram.com"}
 
         # Simulate: QUIC packet to 57.144.144.1, extraction fails
@@ -234,6 +240,8 @@ class TestDnsIpMap(unittest.TestCase):
     def test_dns_fallback_miss(self):
         """When IP not in dns_map, should return None."""
         srv = UdpVpnServer.__new__(UdpVpnServer)
+        srv._ptr_cache = {}
+        srv._ptr_pending = set()
         srv.dns_ip_map = {}
 
         dns_domain = srv.dns_ip_map.get("8.8.8.8")
@@ -293,6 +301,8 @@ class TestDnsFallbackIntegration(unittest.TestCase):
     def test_combined_map_includes_dns(self):
         """Combined SNI map should include TCP + QUIC + DNS."""
         srv = UdpVpnServer.__new__(UdpVpnServer)
+        srv._ptr_cache = {}
+        srv._ptr_pending = set()
         srv._tcp_tracker = {}
         srv._quic_sni_cache = {"57.144.144.1": "instagram.com"}
         srv._tls_sni_log = []
@@ -316,6 +326,8 @@ class TestDnsFallbackIntegration(unittest.TestCase):
     def test_combined_map_priority(self):
         """QUIC SNI should take priority over DNS fallback in combined map."""
         srv = UdpVpnServer.__new__(UdpVpnServer)
+        srv._ptr_cache = {}
+        srv._ptr_pending = set()
         srv._tcp_tracker = {}
         srv._quic_sni_cache = {"57.144.144.1": "i.instagram.com"}
         srv._tls_sni_log = []
@@ -331,6 +343,8 @@ class TestDnsFallbackIntegration(unittest.TestCase):
     def test_dns_enriches_tcp_flows(self):
         """TCP flows without SNI should get DNS domain."""
         srv = UdpVpnServer.__new__(UdpVpnServer)
+        srv._ptr_cache = {}
+        srv._ptr_pending = set()
         srv._tcp_tracker = {
             "10.20.0.2": {
                 "142.251.12.100:443": {"syn": 1, "established": True, "tls_hello": 1, "sni": None},
@@ -480,6 +494,8 @@ class TestDnsCacheEdgeCases(unittest.TestCase):
     def test_dns_map_combined_priority(self):
         """Combined map: QUIC > TCP > DNS (later overwrites earlier)."""
         srv = UdpVpnServer.__new__(UdpVpnServer)
+        srv._ptr_cache = {}
+        srv._ptr_pending = set()
         srv._tcp_tracker = {}
         srv._quic_sni_cache = {"1.2.3.4": "quic.example.com"}
         srv._tls_sni_log = []
@@ -499,6 +515,8 @@ class TestDnsCacheEdgeCases(unittest.TestCase):
     def test_dns_enriches_tcp_flows_multiple(self):
         """Multiple TCP flows get enriched from DNS cache."""
         srv = UdpVpnServer.__new__(UdpVpnServer)
+        srv._ptr_cache = {}
+        srv._ptr_pending = set()
         srv._tcp_tracker = {
             "10.20.0.2": {
                 "142.251.12.100:443": {"syn": 1, "established": True, "tls_hello": 1, "sni": None},
@@ -522,6 +540,8 @@ class TestDnsCacheEdgeCases(unittest.TestCase):
     def test_dns_map_empty(self):
         """Empty DNS map should not affect combined map."""
         srv = UdpVpnServer.__new__(UdpVpnServer)
+        srv._ptr_cache = {}
+        srv._ptr_pending = set()
         srv._tcp_tracker = {}
         srv._quic_sni_cache = {"1.2.3.4": "test.com"}
         srv._tls_sni_log = []
@@ -536,6 +556,8 @@ class TestDnsCacheEdgeCases(unittest.TestCase):
     def test_dns_map_large_scale(self):
         """DNS map with 1000 entries — should not slow down summary."""
         srv = UdpVpnServer.__new__(UdpVpnServer)
+        srv._ptr_cache = {}
+        srv._ptr_pending = set()
         srv._tcp_tracker = {}
         srv._quic_sni_cache = {}
         srv._tls_sni_log = []

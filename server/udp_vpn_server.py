@@ -31,6 +31,7 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import ipaddress
 import select
+from concurrent.futures import ThreadPoolExecutor
 from ntp_sync import NtpSync
 
 # QUIC SNI extraction
@@ -42,7 +43,7 @@ except ImportError:
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
-__version__ = "3.25.0"
+__version__ = "3.26.0"
 
 TUNSETIFF = 0x400454CA
 IFF_TUN = 0x0001
@@ -448,6 +449,9 @@ class UdpVpnServer:
         self.dns_tracks: dict = {}  # src_port → (client_ip, client_addr)
         self.dns_ip_map: dict = {}  # ip → domain (from DNS A record responses)
         self.dns_query_names: dict = {}  # src_port → queried domain name
+        self._ptr_cache: dict = {}  # ip → domain (from reverse DNS PTR lookups)
+        self._ptr_pending: set = set()  # IPs with in-flight PTR lookups
+        self._ptr_executor = ThreadPoolExecutor(max_workers=4)
         self.start_time = time.time()
         self.last_stats = 0
         self.last_save = 0
@@ -846,13 +850,34 @@ class UdpVpnServer:
                     self._tls_sni_log.pop(0)
                 log(f"  [QUIC-DNS] {client_ip}→{dst_ip}:443 SNI={dns_domain}")
             else:
-                # Debug: log failed QUIC extraction (sampled 1/5)
-                if self._quic_initial_seen % 5 == 1:
-                    hdr = _parse_quic_header(udp_payload)
-                    if hdr:
-                        log(f"  [QUIC-FAIL] {dst_ip} ver=0x{hdr['version']:08x} dcid={hdr['dcid'].hex()[:8]}.. len={len(udp_payload)}")
-                    else:
-                        log(f"  [QUIC-FAIL] {dst_ip} len={len(udp_payload)} hdr=None")
+                # PTR fallback: try reverse DNS lookup for unknown IPs
+                if dst_ip in self._ptr_cache:
+                    ptr_domain = self._ptr_cache[dst_ip]
+                    if ptr_domain:
+                        self._quic_sni_extracted += 1
+                        self._quic_sni_cache[dst_ip] = ptr_domain
+                        if client_ip not in self._tcp_tracker:
+                            self._tcp_tracker[client_ip] = {}
+                        flow_key = f"{dst_ip}:443"
+                        self._tcp_tracker[client_ip][flow_key] = {
+                            "syn": 0, "established": True, "tls_hello": 1, "sni": ptr_domain
+                        }
+                        self._tls_sni_log.append(f"{client_ip}→{dst_ip}:443 = {ptr_domain} [ptr]")
+                        if len(self._tls_sni_log) > 50:
+                            self._tls_sni_log.pop(0)
+                        log(f"  [QUIC-PTR] {client_ip}→{dst_ip}:443 SNI={ptr_domain}")
+                    # else: PTR returned None — skip, don't re-lookup
+                elif dst_ip not in self._ptr_pending and len(self._ptr_pending) < 100:
+                    # Schedule async PTR lookup for this IP (non-blocking)
+                    self._ptr_pending.add(dst_ip)
+                    self._ptr_executor.submit(self._do_ptr_lookup, dst_ip)
+                    # Debug: log failed QUIC extraction (sampled 1/5)
+                    if self._quic_initial_seen % 5 == 1:
+                        hdr = _parse_quic_header(udp_payload)
+                        if hdr:
+                            log(f"  [QUIC-FAIL] {dst_ip} ver=0x{hdr['version']:08x} dcid={hdr['dcid'].hex()[:8]}.. len={len(udp_payload)}")
+                        else:
+                            log(f"  [QUIC-FAIL] {dst_ip} len={len(udp_payload)} hdr=None")
 
     def _extract_sni_from_payload(self, data: bytes, ch_offset: int) -> str:
         """Extract SNI from TLS ClientHello at given offset."""
@@ -931,8 +956,11 @@ class UdpVpnServer:
         # DNS IP→domain map (from DNS response A records)
         dns_map = dict(self.dns_ip_map)
 
-        # Combined: TCP + QUIC + DNS domain maps (DNS is lowest priority fallback)
-        combined_map = {**dns_map, **sni_domain_map, **quic_sni_map}
+        # PTR reverse DNS map (filter out None/misses)
+        ptr_map = {k: v for k, v in self._ptr_cache.items() if v is not None}
+
+        # Combined: TCP + QUIC + DNS + PTR (priority: QUIC > TCP > DNS > PTR)
+        combined_map = {**ptr_map, **dns_map, **sni_domain_map, **quic_sni_map}
         combined_sni = len(combined_map)
 
         # Also enrich TCP flows without SNI using DNS map
@@ -961,6 +989,9 @@ class UdpVpnServer:
             "dns_domains": len(dns_map),
             "dns_enriched": dns_enriched,
             "dns_ip_map": dns_map,
+            "ptr_domains": len(ptr_map),
+            "ptr_pending": len(self._ptr_pending),
+            "ptr_map": ptr_map,
             "combined_sni_domains": combined_sni,
             "combined_sni_map": combined_map,
         }
@@ -1064,6 +1095,21 @@ class UdpVpnServer:
             self.sessions.touch(client_ip, tx_bytes=len(resp))
         except OSError as e:
             log(f"DNS response TUN write error: {e}", "WARN")
+
+    def _do_ptr_lookup(self, ip: str):
+        """Reverse DNS lookup (PTR record). Runs in thread pool — non-blocking."""
+        try:
+            hostname, _, _ = socket.gethostbyaddr(ip)
+            # Filter out generic/meaningless PTR names
+            if hostname and hostname != ip and not hostname.startswith("unknown"):
+                self._ptr_cache[ip] = hostname.lower()
+                log(f"  [PTR] {ip} → {hostname}")
+            else:
+                self._ptr_cache[ip] = None
+        except (socket.herror, socket.gaierror, OSError):
+            self._ptr_cache[ip] = None
+        finally:
+            self._ptr_pending.discard(ip)
 
     @staticmethod
     def _parse_dns_qname(data: bytes, offset: int) -> str | None:
