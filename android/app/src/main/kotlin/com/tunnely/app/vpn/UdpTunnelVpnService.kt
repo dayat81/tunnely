@@ -133,6 +133,7 @@ class UdpTunnelVpnService : VpnService() {
     @Volatile private var totalRx: Long = 0
     @Volatile private var totalTx: Long = 0
     @Volatile private var lastPacketTime: Long = 0
+    @Volatile private var tunnelConnectedAt: Long = 0
     private var connectTime: Long = 0
 
     // Network resilience
@@ -442,6 +443,7 @@ class UdpTunnelVpnService : VpnService() {
             // Step 6: Update state
             _vpnState.value = VpnState.CONNECTED
             lastPacketTime = System.currentTimeMillis()
+            tunnelConnectedAt = System.currentTimeMillis()
             _connectionHealth.value = ConnectionHealth(
                 endpoint = "${srvAddr.hostAddress}:$srvPort"
             )
@@ -724,9 +726,10 @@ class UdpTunnelVpnService : VpnService() {
                     )
 
                     // Update health
-                    val idleSecs = (System.currentTimeMillis() - lastPacketTime) / 1000
+                    val connectedSecs = if (tunnelConnectedAt > 0) (nowMs - tunnelConnectedAt) / 1000 else -1
+                    val idleSecs = if (lastPacketTime > 0) (nowMs - lastPacketTime) / 1000 else connectedSecs
                     _connectionHealth.value = _connectionHealth.value.copy(
-                        handshakeAge = if (totalRx > 0 || totalTx > 0) idleSecs else -1,
+                        handshakeAge = connectedSecs,
                         transferRx = totalRx,
                         transferTx = totalTx
                     )
