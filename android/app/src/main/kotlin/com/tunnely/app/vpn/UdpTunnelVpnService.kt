@@ -60,17 +60,6 @@ class UdpTunnelVpnService : VpnService() {
         private const val TUNNEL_PORT = 8770
         private const val TUNNEL_MTU = 1400  // Must be ≤ (ext_iface_MTU - 28 UDP overhead). GCP ens4=1460, so 1400 is safe.
 
-        // Adaptive keepalive intervals
-        private const val KEEPALIVE_NORMAL = 5_000L      // 5s default
-        private const val KEEPALIVE_AGGRESSIVE = 2_000L  // 2s when flapping
-        private const val KEEPALIVE_IDLE = 15_000L       // 15s when no traffic (save battery)
-        private const val IDLE_THRESHOLD_MS = 60_000L    // 60s no traffic = idle
-        private const val COOLDOWN_MS = 30_000L          // Stay aggressive for 30s after failure
-
-        // Health check
-        private const val DEAD_CHECK_INTERVAL = 10_000L  // Check every 10s
-        private const val DEAD_THRESHOLD = 3             // 3 failures = force reconnect
-
         private const val MAX_PACKET = 32767
 
         // DNS handled server-side: server intercepts 10.0.2.3:53 and forwards to 8.8.8.8.
@@ -624,16 +613,11 @@ class UdpTunnelVpnService : VpnService() {
                     val timeSinceFailure = nowMs - lastFailureTime
                     val timeSinceNetworkSwitch = nowMs - lastNetworkSwitchTime
 
-                    val keepaliveInterval = when {
-                        // Aggressive: recent failure or network switch (stay for COOLDOWN)
-                        timeSinceFailure < COOLDOWN_MS || timeSinceNetworkSwitch < COOLDOWN_MS ->
-                            KEEPALIVE_AGGRESSIVE
-                        // Idle: no traffic for a while
-                        timeSinceTraffic > IDLE_THRESHOLD_MS ->
-                            KEEPALIVE_IDLE
-                        // Normal
-                        else -> KEEPALIVE_NORMAL
-                    }
+                    val keepaliveInterval = NetworkResilience.getKeepaliveInterval(
+                        timeSinceTrafficMs = timeSinceTraffic,
+                        timeSinceFailureMs = timeSinceFailure,
+                        timeSinceNetworkSwitchMs = timeSinceNetworkSwitch
+                    )
 
                     // Send keepalive
                     val sock = udpSocket
@@ -700,15 +684,16 @@ class UdpTunnelVpnService : VpnService() {
 
                     // Health check: detect dead connection
                     val nowForCheck = System.currentTimeMillis()
-                    if (nowForCheck - lastHealthCheckMs >= DEAD_CHECK_INTERVAL) {
+                    if (nowForCheck - lastHealthCheckMs >= NetworkResilience.DEAD_CHECK_INTERVAL) {
                         lastHealthCheckMs = nowForCheck
                         val timeSincePacket = nowForCheck - lastPacketTime
-                        if (timeSincePacket > 10_000 && (totalRx > 0 || totalTx > 0)) {
+                        val hasTraffic = totalRx > 0 || totalTx > 0
+                        if (NetworkResilience.isConnectionDead(timeSincePacket, hasTraffic)) {
                             consecutiveDeadChecks++
-                            RemoteLogger.w(TAG, "◉ Dead check: ${consecutiveDeadChecks}/${DEAD_THRESHOLD} " +
+                            RemoteLogger.w(TAG, "◉ Dead check: ${consecutiveDeadChecks}/${NetworkResilience.DEAD_THRESHOLD} " +
                                 "(no traffic for ${timeSincePacket / 1000}s)")
-                            if (consecutiveDeadChecks >= DEAD_THRESHOLD) {
-                                RemoteLogger.e(TAG, "◉ Connection dead for ${DEAD_THRESHOLD * 10}s! " +
+                            if (NetworkResilience.shouldForceReconnect(consecutiveDeadChecks)) {
+                                RemoteLogger.e(TAG, "◉ Connection dead for ${NetworkResilience.DEAD_THRESHOLD * 10}s! " +
                                     "Attempting rebind...")
                                 consecutiveDeadChecks = 0
                                 // Try to rebind to current network
