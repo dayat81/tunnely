@@ -158,6 +158,12 @@ class UdpTunnelVpnService : VpnService() {
     private val EMA_ALPHA = 0.3f
     private var lastProbeSentMs: Long = 0  // separate timing from keepalive
 
+    // NTP sync state (true one-way latency via NTP-synced clocks)
+    @Volatile private var clientNtpOffsetUs: Long = 0  // µs (positive = local clock ahead of NTP)
+    @Volatile private var ntpSynced: Boolean = false
+    private val NTP_RESYNC_INTERVAL_MS = 300_000L  // 5 min
+    @Volatile private var lastNtpSyncMs: Long = 0
+
     override fun onCreate() {
         super.onCreate()
         RemoteLogger.i(TAG, "🟠 onCreate()")
@@ -410,6 +416,23 @@ class UdpTunnelVpnService : VpnService() {
             val hello = ByteBuffer.allocate(4).putInt(0x54554E4E).array() // "TUNN" magic
             udpSocket!!.send(DatagramPacket(hello, hello.size, srvAddr, srvPort))
 
+            // Step 4.5: NTP sync (for true one-way latency)
+            Thread({
+                try {
+                    val result = SntpClient.queryMultiple()
+                    if (result != null) {
+                        clientNtpOffsetUs = result.offsetMs * 1000  // ms → µs
+                        ntpSynced = true
+                        lastNtpSyncMs = System.currentTimeMillis()
+                        RemoteLogger.i(TAG, "NTP synced: offset=${clientNtpOffsetUs}µs, RTT=${result.roundTripMs}ms")
+                    } else {
+                        RemoteLogger.w(TAG, "NTP sync failed, using wall clock")
+                    }
+                } catch (e: Exception) {
+                    RemoteLogger.w(TAG, "NTP sync error: ${e.message}")
+                }
+            }, "ntp-sync").apply { isDaemon = true; start() }
+
             // Step 5: Start I/O threads
             RemoteLogger.i(TAG, "Step 5: Starting I/O threads...")
             startTunToUdpThread(srvAddr, srvPort)
@@ -523,20 +546,31 @@ class UdpTunnelVpnService : VpnService() {
                             val nowUs = LatencyProber.nowMicros()
                             val sentUs = probeSentTimes.remove(probe.sequence)
                             if (sentUs != null) {
-                                val nowUs2 = nowUs  // T4: client receive time
                                 val t1 = sentUs              // T1: client send time
                                 val t2 = probe.serverRecvTs  // T2: server receive time
                                 val t3 = probe.serverEchoTs  // T3: server echo time
-                                val t4 = nowUs2              // T4: client receive time
+                                val t4 = nowUs               // T4: client receive time
 
-                                // NTP clock offset: ((T2-T1) + (T3-T4)) / 2
-                                // Positive = server clock is ahead of client
-                                val clockOffsetUs = ((t2 - t1) + (t3 - t4)) / 2
+                                val uplinkUs: Long
+                                val downlinkUs: Long
+                                val clockOffsetUs: Long
 
-                                // True one-way delays (corrected for clock offset)
-                                val uplinkUs = (t2 - t1) - clockOffsetUs   // client → server
-                                val downlinkUs = (t4 - t3) + clockOffsetUs // server → client
-                                val rttUs = uplinkUs + downlinkUs          // should equal t4 - t1 - serverProc
+                                if (ntpSynced) {
+                                    // True one-way: both clocks NTP-synced → direct subtraction
+                                    // offset = NTP - local, so NTP = local + offset
+                                    val t1c = t1  // already NTP-corrected at send time
+                                    val t4c = t4 + clientNtpOffsetUs  // correct T4 to NTP time
+                                    uplinkUs = t2 - t1c     // true uplink (client → server)
+                                    downlinkUs = t4c - t3   // true downlink (server → client)
+                                    clockOffsetUs = 0L      // no formula needed
+                                } else {
+                                    // Fallback: NTP formula (assumes symmetric paths)
+                                    clockOffsetUs = ((t2 - t1) + (t3 - t4)) / 2
+                                    uplinkUs = (t2 - t1) - clockOffsetUs
+                                    downlinkUs = (t4 - t3) + clockOffsetUs
+                                }
+
+                                val rttUs = uplinkUs + downlinkUs
 
                                 probesRecv++
                                 val rttMs = rttUs / 1000f
@@ -645,7 +679,13 @@ class UdpTunnelVpnService : VpnService() {
                         // Send latency probe (every 5s, separate from keepalive)
                         if (running && nowMs - lastProbeSentMs >= LatencyProber.PROBE_INTERVAL_MS) {
                             try {
-                                val nowUs = LatencyProber.nowMicros()
+                                // NTP-synced timestamp (true one-way when server also NTP-synced)
+                                // offset = NTP - local (positive = NTP ahead), so NTP = local + offset
+                                val nowUs = if (ntpSynced) {
+                                    LatencyProber.nowMicros() + clientNtpOffsetUs
+                                } else {
+                                    LatencyProber.nowMicros()
+                                }
                                 val seq = probeSeq++
                                 val pkt = LatencyProber.ProbePacket(
                                     type = LatencyProber.TYPE_REQUEST,
@@ -719,6 +759,21 @@ class UdpTunnelVpnService : VpnService() {
                             }
                             consecutiveDeadChecks = 0
                         }
+                    }
+
+                    // Periodic NTP re-sync (every 5 min)
+                    if (nowForCheck - lastNtpSyncMs >= NTP_RESYNC_INTERVAL_MS) {
+                        lastNtpSyncMs = nowForCheck
+                        Thread({
+                            try {
+                                val result = SntpClient.queryMultiple()
+                                if (result != null) {
+                                    clientNtpOffsetUs = result.offsetMs * 1000
+                                    ntpSynced = true
+                                    RemoteLogger.d(TAG, "NTP re-synced: offset=${clientNtpOffsetUs}µs")
+                                }
+                            } catch (_: Exception) {}
+                        }, "ntp-resync").apply { isDaemon = true; start() }
                     }
                 } catch (e: InterruptedException) {
                     break

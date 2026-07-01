@@ -31,6 +31,7 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import ipaddress
 import select
+from ntp_sync import NtpSync
 
 # QUIC SNI extraction
 try:
@@ -450,6 +451,7 @@ class UdpVpnServer:
         self.last_save = 0
         self._last_stats_rx = 0
         self._last_stats_tx = 0
+        self.ntp = NtpSync(sync_interval_s=300.0)
 
     def start(self):
         log("=" * 60)
@@ -478,6 +480,10 @@ class UdpVpnServer:
         self.dns_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.dns_sock.bind(("0.0.0.0", 0))  # random port
         log(f"DNS forwarder on :{self.dns_sock.getsockname()[1]}")
+
+        # Start NTP sync (for accurate probe timestamps)
+        self.ntp.start()
+        log(f"NTP sync: offset={self.ntp.offset_us}µs")
 
         log(f"Listening on UDP :{self.port}")
         log(f"Dashboard: http://0.0.0.0:{self.port + 1}/")
@@ -608,11 +614,11 @@ class UdpVpnServer:
         if len(data) == PROBE_SIZE and data[0:4] == TLTP_MAGIC:
             probe_type = data[4]
             if probe_type == PROBE_REQUEST:
-                recv_us = int(time.time() * 1_000_000)
+                recv_us = self.ntp.now_micros()  # NTP-corrected timestamp
                 response = bytearray(data)
                 response[4] = PROBE_RESPONSE
                 struct.pack_into(">q", response, 16, recv_us)  # server recv timestamp
-                echo_us = int(time.time() * 1_000_000)
+                echo_us = self.ntp.now_micros()  # NTP-corrected timestamp
                 struct.pack_into(">q", response, 24, echo_us)  # server echo timestamp
                 try:
                     self.sock.sendto(bytes(response), addr)
