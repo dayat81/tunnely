@@ -163,11 +163,11 @@ class ConnectFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             UdpTunnelVpnService.connectionHealth.collectLatest { health ->
                 withContext(Dispatchers.Main) {
-                    // Update status subtext with handshake info when connected
+                    // Update status subtext with connection info when connected
                     if (UdpTunnelVpnService.vpnState.value == VpnState.CONNECTED) {
                         statusSubtext.text = health.statusText
-                        // Pulse animation if waiting for handshake
-                        if (!health.isHandshakeOk && health.error.isEmpty()) {
+                        // Pulse animation if connection not ok
+                        if (!health.isConnectionOk && health.error.isEmpty()) {
                             startPulseAnimation()
                         } else {
                             stopPulseAnimation()

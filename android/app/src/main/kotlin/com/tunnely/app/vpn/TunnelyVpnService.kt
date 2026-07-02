@@ -38,19 +38,19 @@ enum class VpnState {
 }
 
 data class ConnectionHealth(
-    val handshakeAge: Long = -1,
-    val lastHandshakeEpoch: Long = 0,
+    val idleSecs: Long = -1,
+    val lastActivityEpoch: Long = 0,
     val endpoint: String = "",
     val transferRx: Long = 0,
     val transferTx: Long = 0,
     val error: String = ""
 ) {
-    val isHandshakeOk: Boolean get() = handshakeAge in 0..300
+    val isConnectionOk: Boolean get() = idleSecs in 0..300
     val statusText: String get() = when {
         error.isNotEmpty() -> "❌ $error"
-        handshakeAge < 0 -> "⏳ Waiting for handshake..."
-        handshakeAge > 300 -> "⚠️ Handshake stale (${handshakeAge}s ago)"
-        else -> "✅ Connected (${handshakeAge}s ago)"
+        idleSecs < 0 -> "⏳ Connecting..."
+        idleSecs > 300 -> "⚠️ No activity for ${idleSecs}s"
+        else -> "✅ Connected (${idleSecs}s)"
     }
 }
 
@@ -275,8 +275,8 @@ class TunnelyVpnService : LifecycleService() {
                             }
 
                             _connectionHealth.value = _connectionHealth.value.copy(
-                                handshakeAge = hsAge,
-                                lastHandshakeEpoch = hsEpoch,
+                                idleSecs = hsAge,
+                                lastActivityEpoch = hsEpoch,
                                 transferRx = totalRx,
                                 transferTx = totalTx
                             )

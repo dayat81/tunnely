@@ -445,7 +445,7 @@ class UdpTunnelVpnService : VpnService() {
             lastPacketTime = System.currentTimeMillis()
             tunnelConnectedAt = System.currentTimeMillis()
             _connectionHealth.value = ConnectionHealth(
-                handshakeAge = 0,
+                idleSecs = 0,
                 endpoint = "${srvAddr.hostAddress}:$srvPort"
             )
             updateNotification("Connected ✓")
@@ -736,7 +736,7 @@ class UdpTunnelVpnService : VpnService() {
                     val connectedSecs = if (tunnelConnectedAt > 0) (nowMs - tunnelConnectedAt) / 1000 else -1
                     val idleSecs = if (lastPacketTime > 0) (nowMs - lastPacketTime) / 1000 else connectedSecs
                     _connectionHealth.value = _connectionHealth.value.copy(
-                        handshakeAge = idleSecs,
+                        idleSecs = idleSecs,
                         transferRx = totalRx,
                         transferTx = totalTx
                     )
