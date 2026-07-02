@@ -62,7 +62,12 @@ class NtpSyncedLatencyTest {
             downlinkUs = (t4Us - t3Us) + clockOffsetUs
         }
 
-        val rttUs = uplinkUs + downlinkUs
+        // RTT = client receive − client send (both on same clock)
+        val rttUs = if (ntpSynced) {
+            (t4Us + clientNtpOffsetUs) - t1Us  // both NTP-corrected
+        } else {
+            t4Us - t1Us  // both wall clock
+        }
         return LatencyResult(uplinkUs, downlinkUs, rttUs, clockOffsetUs)
     }
 
@@ -79,7 +84,7 @@ class NtpSyncedLatencyTest {
 
         assertEquals(10_000L, r.uplinkUs)
         assertEquals(10_000L, r.downlinkUs)
-        assertEquals(20_000L, r.rttUs)
+        assertEquals(20_500L, r.rttUs)  // includes 0.5ms server processing
         assertEquals(0L, r.clockOffsetUs)
     }
 
@@ -94,7 +99,7 @@ class NtpSyncedLatencyTest {
 
         assertEquals(5_000L, r.uplinkUs)
         assertEquals(15_000L, r.downlinkUs)
-        assertEquals(20_000L, r.rttUs)
+        assertEquals(20_200L, r.rttUs)  // includes 0.2ms server processing
     }
 
     @Test
@@ -108,7 +113,7 @@ class NtpSyncedLatencyTest {
 
         assertEquals(500L, r.uplinkUs)
         assertEquals(500L, r.downlinkUs)
-        assertEquals(1000L, r.rttUs)
+        assertEquals(1_100L, r.rttUs)  // includes 0.1ms server processing
     }
 
     // ── NTP-synced mode: with client offset ─────────────────────────────
@@ -135,7 +140,7 @@ class NtpSyncedLatencyTest {
 
         assertEquals(10_000L, r.uplinkUs)
         assertEquals(10_000L, r.downlinkUs)
-        assertEquals(20_000L, r.rttUs)
+        assertEquals(20_500L, r.rttUs)  // includes 0.5ms server processing
     }
 
     @Test
@@ -159,7 +164,7 @@ class NtpSyncedLatencyTest {
 
         assertEquals(3_000L, r.uplinkUs)
         assertEquals(15_000L, r.downlinkUs)
-        assertEquals(18_000L, r.rttUs)
+        assertEquals(18_100L, r.rttUs)  // includes 0.1ms server processing
     }
 
     @Test
@@ -181,7 +186,7 @@ class NtpSyncedLatencyTest {
 
         assertEquals(5_000L, r.uplinkUs)
         assertEquals(8_000L, r.downlinkUs)
-        assertEquals(13_000L, r.rttUs)
+        assertEquals(13_100L, r.rttUs)  // includes 0.1ms server processing
     }
 
     // ── Comparison: NTP formula vs NTP-synced ───────────────────────────
@@ -234,7 +239,7 @@ class NtpSyncedLatencyTest {
 
         assertEquals(10_000L, r.uplinkUs)
         assertEquals(10_000L, r.downlinkUs)
-        assertEquals(20_000L, r.rttUs)
+        assertEquals(20_100L, r.rttUs)  // includes 0.1ms server processing
     }
 
     @Test
@@ -249,7 +254,7 @@ class NtpSyncedLatencyTest {
 
         assertEquals(10_000L, r.uplinkUs)
         assertEquals(10_000L, r.downlinkUs)
-        assertEquals(20_000L, r.rttUs)
+        assertEquals(20_100L, r.rttUs)  // includes 0.1ms server processing
     }
 
     // ── RTT always correct ──────────────────────────────────────────────
@@ -264,8 +269,8 @@ class NtpSyncedLatencyTest {
         val ntpSynced = calcLatency(t1, t2, t3, t4, clientNtpOffsetUs = 0, ntpSynced = true)
         val formula = calcLatency(t1, t2, t3, t4, clientNtpOffsetUs = 0, ntpSynced = false)
 
-        assertEquals(22_000L, ntpSynced.rttUs)
-        assertEquals(22_000L, formula.rttUs)
+        assertEquals(22_200L, ntpSynced.rttUs)  // includes 0.2ms server processing
+        assertEquals(22_200L, formula.rttUs)
     }
 
     // ── Edge cases ──────────────────────────────────────────────────────
@@ -291,7 +296,7 @@ class NtpSyncedLatencyTest {
 
         assertEquals(500_000L, r.uplinkUs)
         assertEquals(500_000L, r.downlinkUs)
-        assertEquals(1_000_000L, r.rttUs)
+        assertEquals(1_000_500L, r.rttUs)  // includes 0.5ms server processing
     }
 
     @Test
@@ -332,7 +337,7 @@ class NtpSyncedLatencyTest {
 
         assertEquals(10_000L, r.uplinkUs)
         assertEquals(10_000L, r.downlinkUs)
-        assertEquals(20_000L, r.rttUs)
+        assertEquals(20_100L, r.rttUs)  // includes 0.1ms server processing
     }
 
     @Test
@@ -352,6 +357,6 @@ class NtpSyncedLatencyTest {
 
         assertEquals(2_000L, r.uplinkUs)
         assertEquals(3_000L, r.downlinkUs)
-        assertEquals(5_000L, r.rttUs)
+        assertEquals(5_050L, r.rttUs)  // includes 0.05ms server processing
     }
 }

@@ -421,7 +421,8 @@ class LatencyProberEdgeCaseTest {
 
         assertEquals(10_000L, uplink)
         assertEquals(10_000L, downlink)
-        assertEquals(20_000L, uplink + downlink)  // RTT
+        // RTT = T4 - T1 (client timestamps, same clock)
+        assertEquals(20_050L, recvTimeUs - sendTimeUs)  // includes 50µs server processing
     }
 
     @Test
@@ -546,7 +547,8 @@ class LatencyProberEdgeCaseTest {
             // Compute RTT
             val uplink = serverRecv - sendUs
             val downlink = recvUs - serverEcho
-            val rtt = uplink + downlink
+            // RTT = T4 - T1 (client timestamps only)
+            val rtt = recvUs - sendUs
 
             // EMA
             val rttMs = rtt / 1000f
@@ -612,7 +614,8 @@ class LatencyProberEdgeCaseTest {
         assertEquals(0L, offset)
         assertEquals(10_000L, up)
         assertEquals(10_000L, down)
-        assertEquals(20_000L, up + down)
+        // RTT = T4 - T1 (client timestamps)
+        assertEquals(20_050L, t4 - t1)  // includes 50µs server processing
     }
 
     // ── Data Class Equality ───────────────────────────────────────────────

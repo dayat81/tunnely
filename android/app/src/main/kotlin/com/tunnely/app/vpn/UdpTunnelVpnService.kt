@@ -572,7 +572,13 @@ class UdpTunnelVpnService : VpnService() {
                                     downlinkUs = (t4 - t3) + clockOffsetUs
                                 }
 
-                                val rttUs = uplinkUs + downlinkUs
+                                // RTT = client receive − client send (both on same clock)
+                                val rttUs = if (ntpSynced) {
+                                    // t1 already NTP-corrected, correct t4 to NTP too
+                                    (t4 + clientNtpOffsetUs) - t1
+                                } else {
+                                    t4 - t1  // both wall clock
+                                }
 
                                 probesRecv++
                                 val rttMs = rttUs / 1000f

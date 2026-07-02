@@ -37,7 +37,12 @@ class NtpSyncedLatencyEdgeCaseTest {
             downlinkUs = (t4Us - t3Us) + clockOffsetUs
         }
 
-        val rttUs = uplinkUs + downlinkUs
+        // RTT = client receive − client send (both on same clock)
+        val rttUs = if (ntpSynced) {
+            (t4Us + clientNtpOffsetUs) - t1Us  // both NTP-corrected
+        } else {
+            t4Us - t1Us  // both wall clock
+        }
         return LatencyResult(uplinkUs, downlinkUs, rttUs, clockOffsetUs)
     }
 
@@ -56,7 +61,7 @@ class NtpSyncedLatencyEdgeCaseTest {
         // Formula: symmetric → correct
         assertEquals(10_000L, r.uplinkUs)
         assertEquals(10_000L, r.downlinkUs)
-        assertEquals(20_000L, r.rttUs)
+        assertEquals(20_100L, r.rttUs)  // includes 0.1ms server processing
     }
 
     @Test
@@ -115,7 +120,7 @@ class NtpSyncedLatencyEdgeCaseTest {
 
         assertEquals(10_000L, r.uplinkUs)
         assertEquals(7_000L, r.downlinkUs)
-        assertEquals(17_000L, r.rttUs)
+        assertEquals(17_050L, r.rttUs)  // includes 0.05ms server processing
     }
 
     @Test
@@ -130,7 +135,7 @@ class NtpSyncedLatencyEdgeCaseTest {
 
         assertEquals(25_000L, r.uplinkUs)
         assertEquals(10_000L, r.downlinkUs)
-        assertEquals(35_000L, r.rttUs)
+        assertEquals(35_200L, r.rttUs)  // includes 0.2ms server processing
     }
 
     @Test
@@ -143,7 +148,7 @@ class NtpSyncedLatencyEdgeCaseTest {
         val t3a = 1_005_050L
         val t4aWall = 1_010_050L - clientOffset
         val ra = calcLatency(t1a, t2a, t3a, t4aWall, clientNtpOffsetUs = clientOffset, ntpSynced = true)
-        assertEquals(10_000L, ra.rttUs)
+        assertEquals(10_050L, ra.rttUs)  // includes 0.05ms server processing
 
         // During NAT rebind: 200ms spike
         val t1b = 5_000_000L
@@ -151,7 +156,7 @@ class NtpSyncedLatencyEdgeCaseTest {
         val t3b = 5_100_100L
         val t4bWall = 5_200_100L - clientOffset  // 100ms down
         val rb = calcLatency(t1b, t2b, t3b, t4bWall, clientNtpOffsetUs = clientOffset, ntpSynced = true)
-        assertEquals(200_000L, rb.rttUs)
+        assertEquals(200_100L, rb.rttUs)  // includes 0.1ms server processing
 
         // After rebind: back to normal
         val t1c = 10_000_000L
@@ -159,7 +164,7 @@ class NtpSyncedLatencyEdgeCaseTest {
         val t3c = 10_005_050L
         val t4cWall = 10_010_050L - clientOffset
         val rc = calcLatency(t1c, t2c, t3c, t4cWall, clientNtpOffsetUs = clientOffset, ntpSynced = true)
-        assertEquals(10_000L, rc.rttUs)
+        assertEquals(10_050L, rc.rttUs)  // includes 0.05ms server processing
     }
 
     // ── Mobile Device Clock Quirks ────────────────────────────────────────
@@ -178,7 +183,7 @@ class NtpSyncedLatencyEdgeCaseTest {
 
         assertEquals(10_000L, r.uplinkUs)
         assertEquals(10_000L, r.downlinkUs)
-        assertEquals(20_000L, r.rttUs)
+        assertEquals(20_100L, r.rttUs)  // includes 0.1ms server processing
     }
 
     @Test
@@ -192,7 +197,7 @@ class NtpSyncedLatencyEdgeCaseTest {
         val t3a = 1_005_050L
         val t4a = 1_010_050L
         val ra = calcLatency(t1a, t2a, t3a, t4a, clientNtpOffsetUs = clientOffsetBefore, ntpSynced = true)
-        assertEquals(10_000L, ra.rttUs)
+        assertEquals(10_050L, ra.rttUs)  // includes 0.05ms server processing
 
         // After jump: NTP re-syncs, offset changes
         // T1 corrected = 5_000_000 + (-1_000_000) = 4_000_000 (NTP time)
@@ -205,7 +210,7 @@ class NtpSyncedLatencyEdgeCaseTest {
 
         assertEquals(5_000L, rb.uplinkUs)
         assertEquals(10_000L, rb.downlinkUs)
-        assertEquals(15_000L, rb.rttUs)
+        assertEquals(15_050L, rb.rttUs)  // includes 0.05ms server processing
     }
 
     @Test
@@ -226,7 +231,7 @@ class NtpSyncedLatencyEdgeCaseTest {
         // T4 corrected = -979_900 + 2_000_000 = 1_020_100
         assertEquals(10_000L, r.uplinkUs)
         assertEquals(10_000L, r.downlinkUs)
-        assertEquals(20_000L, r.rttUs)
+        assertEquals(20_100L, r.rttUs)  // includes 0.1ms server processing
     }
 
     // ── Extreme Network Conditions ────────────────────────────────────────
@@ -242,7 +247,7 @@ class NtpSyncedLatencyEdgeCaseTest {
 
         assertEquals(300_000L, r.uplinkUs)
         assertEquals(300_000L, r.downlinkUs)
-        assertEquals(600_000L, r.rttUs)
+        assertEquals(600_500L, r.rttUs)  // includes 0.5ms server processing
     }
 
     @Test
@@ -257,7 +262,7 @@ class NtpSyncedLatencyEdgeCaseTest {
 
         assertEquals(500_000L, r.uplinkUs)
         assertEquals(2_000L, r.downlinkUs)
-        assertEquals(502_000L, r.rttUs)
+        assertEquals(502_100L, r.rttUs)  // includes 0.1ms server processing
     }
 
     @Test
@@ -271,7 +276,7 @@ class NtpSyncedLatencyEdgeCaseTest {
 
         assertEquals(500_000L, r.uplinkUs)
         assertEquals(500_000L, r.downlinkUs)
-        assertEquals(1_000_000L, r.rttUs)
+        assertEquals(1_000_500L, r.rttUs)  // includes 0.5ms server processing
     }
 
     @Test
@@ -285,7 +290,7 @@ class NtpSyncedLatencyEdgeCaseTest {
 
         assertEquals(300L, r.uplinkUs)
         assertEquals(300L, r.downlinkUs)
-        assertEquals(600L, r.rttUs)
+        assertEquals(650L, r.rttUs)  // includes 0.05ms server processing
     }
 
     @Test
@@ -340,7 +345,7 @@ class NtpSyncedLatencyEdgeCaseTest {
 
         assertEquals(10_000L, r.uplinkUs)
         assertEquals(10_000L, r.downlinkUs)
-        assertEquals(20_000L, r.rttUs)
+        assertEquals(20_100L, r.rttUs)  // includes 0.1ms server processing
     }
 
     @Test
@@ -362,7 +367,7 @@ class NtpSyncedLatencyEdgeCaseTest {
 
         assertEquals(5_000L, r.uplinkUs)
         assertEquals(10_000L, r.downlinkUs)
-        assertEquals(15_000L, r.rttUs)
+        assertEquals(15_100L, r.rttUs)  // includes 0.1ms server processing
     }
 
     // ── RTT Invariant Tests ───────────────────────────────────────────────
@@ -377,7 +382,7 @@ class NtpSyncedLatencyEdgeCaseTest {
 
         val trueUp = 15_000L
         val trueDown = 25_000L
-        val expectedRtt = trueUp + trueDown
+        val expectedRtt = trueUp + trueDown + 100L  // includes 100µs server processing
 
         for (offset in offsets) {
             val t1 = 1_000_000L
@@ -409,10 +414,10 @@ class NtpSyncedLatencyEdgeCaseTest {
 
             val r = calcLatency(t1, t2, t3, t4Wall, clientNtpOffsetUs = clientOffset, ntpSynced = true)
 
-            // RTT = uplink + downlink = trueUp + trueDown (proc excluded)
+            // RTT = T4 - T1 = trueUp + proc + trueDown (includes server processing)
             assertEquals(
                 "RTT with proc=$proc",
-                trueUp + trueDown, r.rttUs
+                trueUp + trueDown + proc, r.rttUs
             )
         }
     }
@@ -435,7 +440,7 @@ class NtpSyncedLatencyEdgeCaseTest {
 
             assertEquals("probe $i uplink", trueUp, r.uplinkUs)
             assertEquals("probe $i downlink", trueDown, r.downlinkUs)
-            assertEquals("probe $i RTT", trueUp + trueDown, r.rttUs)
+            assertEquals("probe $i RTT", trueUp + trueDown + 100L, r.rttUs)  // includes 0.1ms proc
         }
     }
 
@@ -493,13 +498,13 @@ class NtpSyncedLatencyEdgeCaseTest {
         // First 5 probes: formula mode (symmetric → correct)
         for (i in 0 until 5) {
             val r = calcLatency(t1, t2, t3, t4, clientNtpOffsetUs = 0, ntpSynced = false)
-            assertEquals(20_000L, r.rttUs)  // 10ms up + 10ms down
+            assertEquals(20_100L, r.rttUs)  // includes 0.1ms server processing
         }
 
         // NTP sync completes, switch to NTP-synced mode
         for (i in 0 until 5) {
             val r = calcLatency(t1, t2, t3, t4, clientNtpOffsetUs = 0, ntpSynced = true)
-            assertEquals(20_000L, r.rttUs)
+            assertEquals(20_100L, r.rttUs)  // includes 0.1ms server processing
         }
     }
 
@@ -513,14 +518,14 @@ class NtpSyncedLatencyEdgeCaseTest {
         val t4Wall1 = 1_020_100L - offset1  // 10ms down
 
         val r1 = calcLatency(t1, t2, t3, t4Wall1, clientNtpOffsetUs = offset1, ntpSynced = true)
-        assertEquals(20_000L, r1.rttUs)  // 10ms up + 10ms down
+        assertEquals(20_100L, r1.rttUs)  // includes 0.1ms server processing
 
         // Re-sync: offset changes to 20ms (drift)
         val offset2 = 20_000L
         val t4Wall2 = 1_020_100L - offset2  // still 10ms down
 
         val r2 = calcLatency(t1, t2, t3, t4Wall2, clientNtpOffsetUs = offset2, ntpSynced = true)
-        assertEquals(20_000L, r2.rttUs)
+        assertEquals(20_100L, r2.rttUs)  // includes 0.1ms server processing
     }
 
     // ── Boundary: Integer Overflow Safety ─────────────────────────────────
@@ -564,7 +569,7 @@ class NtpSyncedLatencyEdgeCaseTest {
         // T4 corrected = -3_979_900 + 5_000_000 = 1_020_100
         assertEquals(10_000L, r.uplinkUs)
         assertEquals(10_000L, r.downlinkUs)
-        assertEquals(20_000L, r.rttUs)
+        assertEquals(20_100L, r.rttUs)  // includes 0.1ms server processing
     }
 
     // ── Server Processing Time Impact ─────────────────────────────────────
@@ -595,7 +600,7 @@ class NtpSyncedLatencyEdgeCaseTest {
 
         assertEquals(10_000L, r.uplinkUs)
         assertEquals(10_000L, r.downlinkUs)
-        assertEquals(20_000L, r.rttUs)  // RTT does NOT include server proc
+        assertEquals(30_000L, r.rttUs)  // RTT = T4-T1 includes 10ms server proc
     }
 
     @Test
@@ -606,6 +611,6 @@ class NtpSyncedLatencyEdgeCaseTest {
 
         assertEquals(5_000L, r.uplinkUs)
         assertEquals(5_000L, r.downlinkUs)
-        assertEquals(10_000L, r.rttUs)  // Still 10ms network RTT
+        assertEquals(110_000L, r.rttUs)  // RTT = T4-T1 includes 100ms server proc
     }
 }
