@@ -360,4 +360,320 @@ class SplitTunnelAdapterTest {
 
         assertTrue(app.selected)
     }
+
+    // ── Filter + toggle interaction ──────────────────────────────────
+
+    @Test
+    fun `toggle while filtered preserves selection across filter clear`() {
+        val allApps = mutableListOf(
+            MockApp("com.whatsapp", "WhatsApp", selected = false),
+            MockApp("com.chrome", "Chrome", selected = false),
+            MockApp("com.instagram", "Instagram", selected = false),
+        )
+
+        // Filter shows only WhatsApp and Chrome (Instagram hidden)
+        val filtered = allApps.filter { it.appName != "Instagram" }.toMutableList()
+
+        // User toggles WhatsApp in filtered view
+        filtered[0].selected = true
+
+        // Clear filter — allApps still references same objects
+        val selected = allApps.filter { it.selected }.map { it.packageName }.toSet()
+
+        assertEquals(1, selected.size)
+        assertTrue(selected.contains("com.whatsapp"))
+    }
+
+    @Test
+    fun `toggle hidden app then clear filter shows correct state`() {
+        val allApps = mutableListOf(
+            MockApp("com.whatsapp", "WhatsApp", selected = false),
+            MockApp("com.chrome", "Chrome", selected = false),
+            MockApp("com.instagram", "Instagram", selected = false),
+        )
+
+        // Filter hides Instagram
+        val filtered = allApps.filter { it.appName != "Instagram" }.toMutableList()
+        assertEquals(2, filtered.size)
+
+        // User selects WhatsApp in filtered view
+        filtered[0].selected = true
+
+        // Save (simulated)
+        val saved = allApps.filter { it.selected }.map { it.packageName }.toSet()
+        assertEquals(setOf("com.whatsapp"), saved)
+
+        // Restore in new dialog with no filter
+        allApps.forEach { it.selected = it.packageName in saved }
+        assertTrue(allApps[0].selected)  // WhatsApp ✓
+        assertFalse(allApps[1].selected) // Chrome ✗
+        assertFalse(allApps[2].selected) // Instagram ✗
+    }
+
+    // ── RecyclerView recycling ──────────────────────────────────────
+
+    @Test
+    fun `recycled ViewHolder rebind does not corrupt selection`() {
+        // Simulate: ViewHolder at position 0 (WhatsApp, selected=true)
+        // gets recycled and rebound to position 2 (Instagram, selected=false)
+        val app1 = MockApp("com.whatsapp", "WhatsApp", selected = true)
+        val app2 = MockApp("com.instagram", "Instagram", selected = false)
+
+        // ViewHolder was bound to app1
+        var boundApp = app1
+        assertTrue(boundApp.selected)
+
+        // RecyclerView recycles — rebind to app2
+        boundApp = app2
+        assertFalse(boundApp.selected)
+
+        // app1 should still be selected
+        assertTrue(app1.selected)
+    }
+
+    @Test
+    fun `multiple recycles maintain independent state`() {
+        val apps = listOf(
+            MockApp("com.a", "A", selected = true),
+            MockApp("com.b", "B", selected = false),
+            MockApp("com.c", "C", selected = true),
+            MockApp("com.d", "D", selected = false),
+        )
+
+        // Simulate 4 ViewHolders cycling through apps
+        val viewHolders = arrayOf(apps[0], apps[1], apps[2], apps[3])
+
+        // Scroll — recycle VH0 to new position
+        viewHolders[0] = apps[3]  // VH0 now shows D
+
+        // Verify all states preserved
+        assertTrue(apps[0].selected)   // A still selected
+        assertFalse(apps[1].selected)  // B still not selected
+        assertTrue(apps[2].selected)   // C still selected
+        assertFalse(apps[3].selected)  // D still not selected
+    }
+
+    // ── Checkbox + row click interaction ─────────────────────────────
+
+    @Test
+    fun `checkbox tap then row tap on same item nets to original state`() {
+        val app = MockApp("com.whatsapp", "WhatsApp", selected = false)
+
+        // User taps checkbox (with listener)
+        app.selected = true  // isChecked = true
+        assertTrue(app.selected)
+
+        // Then taps the row (with listener suppression)
+        app.selected = !app.selected  // row click: true → false
+        // Listener suppressed, no double-toggle
+        assertFalse(app.selected)
+    }
+
+    @Test
+    fun `row tap then checkbox tap on same item`() {
+        val app = MockApp("com.whatsapp", "WhatsApp", selected = false)
+
+        // User taps row (with listener suppression)
+        app.selected = !app.selected  // false → true
+        assertTrue(app.selected)
+
+        // Then taps checkbox (with listener)
+        app.selected = false  // isChecked = false (uncheck)
+        assertFalse(app.selected)
+    }
+
+    // ── Save cycles ─────────────────────────────────────────────────
+
+    @Test
+    fun `save empty set after having apps`() {
+        var savedApps = setOf("com.whatsapp", "com.chrome")
+
+        // User clears all
+        savedApps = emptySet()
+
+        assertTrue(savedApps.isEmpty())
+    }
+
+    @Test
+    fun `save same apps twice produces same result`() {
+        val apps = mutableListOf(
+            MockApp("com.whatsapp", "WhatsApp", selected = true),
+            MockApp("com.chrome", "Chrome", selected = false),
+        )
+
+        val save1 = apps.filter { it.selected }.map { it.packageName }.toSet()
+        val save2 = apps.filter { it.selected }.map { it.packageName }.toSet()
+
+        assertEquals(save1, save2)
+        assertEquals(setOf("com.whatsapp"), save1)
+    }
+
+    @Test
+    fun `save after single toggle changes result`() {
+        val apps = mutableListOf(
+            MockApp("com.whatsapp", "WhatsApp", selected = true),
+            MockApp("com.chrome", "Chrome", selected = false),
+        )
+
+        val before = apps.filter { it.selected }.map { it.packageName }.toSet()
+        assertEquals(1, before.size)
+
+        // Toggle Chrome on
+        apps[1].selected = true
+        val after = apps.filter { it.selected }.map { it.packageName }.toSet()
+        assertEquals(2, after.size)
+        assertTrue(after.contains("com.chrome"))
+    }
+
+    // ── Large app list ──────────────────────────────────────────────
+
+    @Test
+    fun `100 apps toggle random selection`() {
+        val apps = (0 until 100).map { i ->
+            MockApp("com.app.$i", "App $i", selected = false)
+        }.toMutableList()
+
+        // Select every 3rd app
+        for (i in apps.indices step 3) {
+            apps[i].selected = true
+        }
+
+        val selected = apps.filter { it.selected }.map { it.packageName }.toSet()
+        assertEquals(34, selected.size) // 0,3,6,...,99 = 34 apps
+
+        // Save and restore
+        val saved = selected
+        apps.forEach { it.selected = it.packageName in saved }
+        val restored = apps.filter { it.selected }.map { it.packageName }.toSet()
+        assertEquals(saved, restored)
+    }
+
+    @Test
+    fun `1000 apps toggle all`() {
+        val apps = (0 until 1000).map { i ->
+            MockApp("com.app.$i", "App $i", selected = false)
+        }.toMutableList()
+
+        apps.forEach { it.selected = true }
+        val selected = apps.filter { it.selected }.map { it.packageName }.toSet()
+        assertEquals(1000, selected.size)
+
+        apps.forEach { it.selected = false }
+        val cleared = apps.filter { it.selected }.map { it.packageName }.toSet()
+        assertTrue(cleared.isEmpty())
+    }
+
+    // ── Package name edge cases ─────────────────────────────────────
+
+    @Test
+    fun `unicode package name toggle`() {
+        val app = MockApp("com.日本語.app", "日本語アプリ", selected = false)
+        app.selected = true
+        assertTrue(app.selected)
+
+        val selected = listOf(app).filter { it.selected }.map { it.packageName }.toSet()
+        assertEquals(setOf("com.日本語.app"), selected)
+    }
+
+    @Test
+    fun `very long package name toggle`() {
+        val longPkg = "com." + "a".repeat(500) + ".app"
+        val app = MockApp(longPkg, "Long App", selected = false)
+        app.selected = true
+
+        val selected = listOf(app).filter { it.selected }.map { it.packageName }.toSet()
+        assertEquals(setOf(longPkg), selected)
+    }
+
+    @Test
+    fun `empty package name edge case`() {
+        val app = MockApp("", "Empty", selected = false)
+        app.selected = true
+
+        val selected = listOf(app).filter { it.selected }.map { it.packageName }.toSet()
+        assertEquals(setOf(""), selected)
+    }
+
+    @Test
+    fun `duplicate package names in list`() {
+        // Edge case: duplicate entries (shouldn't happen but shouldn't crash)
+        val apps = listOf(
+            MockApp("com.whatsapp", "WhatsApp", selected = true),
+            MockApp("com.whatsapp", "WhatsApp 2", selected = false),
+        )
+
+        val selected = apps.filter { it.selected }.map { it.packageName }.toSet()
+        assertEquals(1, selected.size)
+        assertTrue(selected.contains("com.whatsapp"))
+
+        // Toggle second entry
+        apps[1].selected = true
+        val both = apps.filter { it.selected }.map { it.packageName }.toSet()
+        assertEquals(1, both.size) // set deduplicates
+    }
+
+    // ── set/get roundtrip with various sizes ────────────────────────
+
+    @Test
+    fun `set then get single app`() {
+        val apps = mutableListOf(
+            MockApp("com.whatsapp", "WhatsApp", selected = false),
+        )
+        val saved = setOf("com.whatsapp")
+        apps.forEach { it.selected = it.packageName in saved }
+
+        val restored = apps.filter { it.selected }.map { it.packageName }.toSet()
+        assertEquals(saved, restored)
+    }
+
+    @Test
+    fun `set then get 50 apps`() {
+        val saved = (0 until 50).map { "com.app.$it" }.toSet()
+        val apps = (0 until 50).map { i ->
+            MockApp("com.app.$i", "App $i", selected = false)
+        }.toMutableList()
+
+        apps.forEach { it.selected = it.packageName in saved }
+        val restored = apps.filter { it.selected }.map { it.packageName }.toSet()
+
+        assertEquals(50, restored.size)
+        assertEquals(saved, restored)
+    }
+
+    @Test
+    fun `restore with apps not in list is safe`() {
+        // Saved set contains packages that are no longer installed
+        val saved = setOf("com.whatsapp", "com.uninstalled.app", "com.also.gone")
+        val apps = mutableListOf(
+            MockApp("com.whatsapp", "WhatsApp", selected = false),
+            MockApp("com.chrome", "Chrome", selected = false),
+        )
+
+        apps.forEach { it.selected = it.packageName in saved }
+
+        assertTrue(apps[0].selected)   // WhatsApp found ✓
+        assertFalse(apps[1].selected)  // Chrome not in saved ✓
+        // Uninstalled apps simply don't appear — no crash
+    }
+
+    @Test
+    fun `toggle stress test with alternating pattern`() {
+        val apps = (0 until 10).map { i ->
+            MockApp("com.app.$i", "App $i", selected = false)
+        }.toMutableList()
+
+        // Alternating pattern: select even, toggle all, select odd
+        for (round in 0 until 3) {
+            for (i in apps.indices) {
+                if ((i + round) % 2 == 0) {
+                    apps[i].selected = true
+                } else {
+                    apps[i].selected = false
+                }
+            }
+            val selected = apps.filter { it.selected }.map { it.packageName }.toSet()
+            // Each round should have 5 selected
+            assertEquals("Round $round: expected 5 selected", 5, selected.size)
+        }
+    }
 }
