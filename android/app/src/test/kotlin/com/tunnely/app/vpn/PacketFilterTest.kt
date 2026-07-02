@@ -293,4 +293,262 @@ class PacketFilterTest {
         val pkt = buildIpv4Packet("10.20.0.100", "142.250.1.1", protocol = 6)
         assertFalse(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
     }
+
+    // ── Additional edge cases ──────────────────────────────────────────
+
+    // Source IP: same /24 but different host
+    @Test
+    fun `drop - src 10_20_0_10 same subnet different host`() {
+        val pkt = buildIpv4Packet("10.20.0.10", "8.8.8.8")
+        assertFalse(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    @Test
+    fun `drop - src 10_20_0_254 same subnet last valid host`() {
+        val pkt = buildIpv4Packet("10.20.0.254", "8.8.8.8")
+        assertFalse(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    @Test
+    fun `drop - src 10_20_0_0 network address`() {
+        val pkt = buildIpv4Packet("10.20.0.0", "8.8.8.8")
+        assertFalse(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    // Source IP: different /24 same /16
+    @Test
+    fun `drop - src 10_20_1_2 same block different subnet`() {
+        val pkt = buildIpv4Packet("10.20.1.2", "8.8.8.8")
+        assertFalse(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    // Source IP: link-local (169.254.x.x)
+    @Test
+    fun `drop - src link-local 169_254_1_1`() {
+        val pkt = buildIpv4Packet("169.254.1.1", "8.8.8.8")
+        assertFalse(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    // Source IP: CGNAT range
+    @Test
+    fun `drop - src CGNAT 100_64_0_1`() {
+        val pkt = buildIpv4Packet("100.64.0.1", "8.8.8.8")
+        assertFalse(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    // Destination: loopback
+    @Test
+    fun `forward - dst 127_0_0_1 loopback (from TUN IP, allowed)`() {
+        // Filter doesn't check dst for loopback — only src IP + multicast
+        val pkt = buildIpv4Packet("10.20.0.2", "127.0.0.1")
+        assertTrue(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    // Destination: link-local
+    @Test
+    fun `forward - dst 169_254_0_1 link-local (allowed, not multicast)`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "169.254.0.1")
+        assertTrue(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    // Destination: Class E experimental (240-254)
+    @Test
+    fun `drop - dst 240_0_0_1 class E experimental (in multicast filter)`() {
+        // 240 >= 224 → dropped
+        val pkt = buildIpv4Packet("10.20.0.2", "240.0.0.1")
+        assertFalse(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    @Test
+    fun `drop - dst 254_255_255_255 highest class E`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "254.255.255.255")
+        assertFalse(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    // Multicast boundary precision
+    @Test
+    fun `forward - dst 223_0_0_1 just below multicast range`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "223.0.0.1")
+        assertTrue(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    @Test
+    fun `drop - dst 224_0_0_2 multicast base+1`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "224.0.0.2")
+        assertFalse(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    @Test
+    fun `drop - dst 225_0_0_1 multicast second group`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "225.0.0.1")
+        assertFalse(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    // IP header with options (IHL > 5)
+    @Test
+    fun `forward - IPv4 with options IHL=6`() {
+        // IHL=6 means 24-byte header (6*4). Source IP still at offset 12.
+        val pkt = ByteArray(44)
+        pkt[0] = 0x46.toByte()  // Version=4, IHL=6
+        pkt[2] = 0; pkt[3] = 44  // total length
+        pkt[8] = 64; pkt[9] = 6  // TTL, TCP
+        // src = 10.20.0.2
+        pkt[12] = 10; pkt[13] = 20; pkt[14] = 0; pkt[15] = 2
+        // dst = 8.8.8.8
+        pkt[16] = 8; pkt[17] = 8; pkt[18] = 8; pkt[19] = 8
+        assertTrue(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    @Test
+    fun `forward - IPv4 with options IHL=15 (max)`() {
+        // IHL=15 means 60-byte header. Source IP still at offset 12.
+        val pkt = ByteArray(80)
+        pkt[0] = 0x4F.toByte()  // Version=4, IHL=15
+        pkt[2] = 0; pkt[3] = 80  // total length
+        pkt[8] = 64; pkt[9] = 17  // TTL, UDP
+        pkt[12] = 10; pkt[13] = 20; pkt[14] = 0; pkt[15] = 2
+        pkt[16] = 8; pkt[17] = 8; pkt[18] = 8; pkt[19] = 8
+        assertTrue(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    // Fragmented packets (MF flag or fragment offset > 0)
+    @Test
+    fun `forward - fragmented packet MF=1 offset=0`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "8.8.8.8")
+        pkt[6] = 0x20.toByte()  // Flags: MF=1, Fragment offset=0
+        assertTrue(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    @Test
+    fun `forward - fragmented packet MF=0 offset=185`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "8.8.8.8")
+        pkt[6] = 0x00.toByte()
+        pkt[7] = 0xB9.toByte()  // Fragment offset=185
+        assertTrue(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    // TTL edge cases
+    @Test
+    fun `forward - TTL=0 (filter doesn't check TTL)`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "8.8.8.8")
+        pkt[8] = 0  // TTL=0
+        assertTrue(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    @Test
+    fun `forward - TTL=1`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "8.8.8.8")
+        pkt[8] = 1
+        assertTrue(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    // Protocol variations
+    @Test
+    fun `forward - GRE protocol 47`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "8.8.8.8", protocol = 47)
+        assertTrue(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    @Test
+    fun `forward - SCTP protocol 132`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "8.8.8.8", protocol = 132)
+        assertTrue(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    @Test
+    fun `forward - unknown protocol 255`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "8.8.8.8", protocol = 255)
+        assertTrue(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    // Packet size boundaries
+    @Test
+    fun `forward - exactly MTU 1400 bytes`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "8.8.8.8", totalLen = 1400)
+        assertTrue(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    @Test
+    fun `forward - jumbo 65535 bytes (max IPv4)`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "8.8.8.8", totalLen = 200)
+        // Filter only checks first 20 bytes, not actual total length
+        assertTrue(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    @Test
+    fun `drop - n=0 empty read`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "8.8.8.8")
+        assertFalse(UdpTunnelVpnService.shouldForwardPacket(pkt, 0))
+    }
+
+    @Test
+    fun `drop - n=10 partial header`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "8.8.8.8")
+        assertFalse(UdpTunnelVpnService.shouldForwardPacket(pkt, 10))
+    }
+
+    @Test
+    fun `forward - n=20 exact minimum header`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "8.8.8.8", totalLen = 100)
+        assertTrue(UdpTunnelVpnService.shouldForwardPacket(pkt, 20))
+    }
+
+    @Test
+    fun `drop - n=19 one byte short of minimum`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "8.8.8.8", totalLen = 100)
+        assertFalse(UdpTunnelVpnService.shouldForwardPacket(pkt, 19))
+    }
+
+    // Combined: wrong src + multicast dst
+    @Test
+    fun `drop - wrong src AND multicast dst (both filters)`() {
+        val pkt = buildIpv4Packet("192.168.1.1", "224.0.0.251")
+        // Src IP check fails first → dropped
+        assertFalse(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    // Combined: TUN src + multicast dst
+    @Test
+    fun `drop - TUN src to mDNS 224_0_0_251`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "224.0.0.251", protocol = 17)
+        assertFalse(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    // ToS / DSCP field (byte 1) — filter doesn't check, should pass
+    @Test
+    fun `forward - DSCP EF (byte 1 = 0xB8)`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "8.8.8.8")
+        pkt[1] = 0xB8.toByte()  // DSCP=46 (EF), ECN=0
+        assertTrue(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    // IP checksum (bytes 10-11) — filter doesn't verify, should pass
+    @Test
+    fun `forward - bad checksum (filter doesn't verify)`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "8.8.8.8")
+        pkt[10] = 0xFF.toByte()
+        pkt[11] = 0xFF.toByte()
+        assertTrue(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    // Server traffic (dst = server IP)
+    @Test
+    fun `forward - to server 35_219_34_37`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "35.219.34.37", protocol = 17)
+        assertTrue(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    // Google DNS
+    @Test
+    fun `forward - to Google DNS 8_8_4_4`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "8.8.4.4", protocol = 17)
+        assertTrue(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
+
+    // Cloudflare DNS
+    @Test
+    fun `forward - to Cloudflare 1_1_1_1`() {
+        val pkt = buildIpv4Packet("10.20.0.2", "1.1.1.1", protocol = 17)
+        assertTrue(UdpTunnelVpnService.shouldForwardPacket(pkt, pkt.size))
+    }
 }
