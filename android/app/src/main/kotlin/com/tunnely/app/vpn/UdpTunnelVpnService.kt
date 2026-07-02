@@ -65,6 +65,31 @@ class UdpTunnelVpnService : VpnService() {
             (parts[0].toInt() shl 24) or (parts[1].toInt() shl 16) or (parts[2].toInt() shl 8) or parts[3].toInt()
         }
 
+        /**
+         * WireGuard-style packet filter for TUN→UDP thread.
+         * Returns true if packet should be forwarded, false if dropped.
+         *
+         * Filters:
+         * 1. Non-IPv4 packets (version != 4)
+         * 2. Source IP != TUN IP (crypto-key routing equivalent)
+         * 3. Multicast destination (224.0.0.0/4) — discovery traffic
+         */
+        fun shouldForwardPacket(buf: ByteArray, n: Int): Boolean {
+            if (n < 20) return false
+            // Drop non-IPv4
+            val version = (buf[0].toInt() and 0xF0) shr 4
+            if (version != 4) return false
+            // Drop if source IP != TUN IP
+            val srcIp = ((buf[12].toInt() and 0xFF) shl 24) or
+                        ((buf[13].toInt() and 0xFF) shl 16) or
+                        ((buf[14].toInt() and 0xFF) shl 8) or
+                         (buf[15].toInt() and 0xFF)
+            if (srcIp != TUN_IP_INT) return false
+            // Drop multicast destination (224.0.0.0/4)
+            if ((buf[16].toInt() and 0xFF) >= 224) return false
+            return true
+        }
+
         private const val MAX_PACKET = 32767
 
         // DNS handled server-side: server intercepts 10.0.2.3:53 and forwards to 8.8.8.8.
@@ -485,21 +510,8 @@ class UdpTunnelVpnService : VpnService() {
                     val n = input.read(buf)
                     if (n <= 0) continue
 
-                    // --- WireGuard-style packet filter ---
-                    // Drop non-IPv4
-                    val version = (buf[0].toInt() and 0xF0) shr 4
-                    if (version != 4) continue
-
-                    // Drop if source IP != TUN IP (crypto-key routing equivalent)
-                    // Prevents system traffic leakage through TUN
-                    val srcIp = ((buf[12].toInt() and 0xFF) shl 24) or
-                                ((buf[13].toInt() and 0xFF) shl 16) or
-                                ((buf[14].toInt() and 0xFF) shl 8) or
-                                 (buf[15].toInt() and 0xFF)
-                    if (srcIp != TUN_IP_INT) continue
-
-                    // Drop multicast (224.0.0.0/4) — discovery traffic
-                    if ((buf[16].toInt() and 0xFF) >= 224) continue
+                    // WireGuard-style packet filter
+                    if (!shouldForwardPacket(buf, n)) continue
 
                     // Track flow
                     PacketFlowTracker.processPacket(buf.copyOf(n), isUplink = true)
