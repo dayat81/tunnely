@@ -78,13 +78,19 @@ class SplitTunnelAppAdapter(
             appName.text = app.appName
             appCheck.setOnCheckedChangeListener(null)
             appCheck.isChecked = app.selected
-            appCheck.setOnCheckedChangeListener { _, _ ->
-                app.selected = !app.selected
+            appCheck.setOnCheckedChangeListener { _, isChecked ->
+                app.selected = isChecked
                 onToggle(app)
             }
             itemView.setOnClickListener {
                 app.selected = !app.selected
+                // Suppress listener to prevent double-toggle
+                appCheck.setOnCheckedChangeListener(null)
                 appCheck.isChecked = app.selected
+                appCheck.setOnCheckedChangeListener { _, isChecked ->
+                    app.selected = isChecked
+                    onToggle(app)
+                }
                 onToggle(app)
             }
         }

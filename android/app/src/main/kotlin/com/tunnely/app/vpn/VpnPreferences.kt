@@ -60,7 +60,10 @@ class VpnPreferences(context: Context) {
 
     var splitApps: Set<String>
         get() = prefs.getStringSet("split_apps", emptySet())?.toSet() ?: emptySet()
-        set(value) { prefs.edit().putStringSet("split_apps", value).commit() }
+        set(value) {
+            // remove() first: putStringSet skips write if new set equals old set
+            prefs.edit().remove("split_apps").putStringSet("split_apps", value).commit()
+        }
 
     var remoteLogging: Boolean
         get() = prefs.getBoolean("remote_logging", false)
