@@ -59,6 +59,11 @@ class UdpTunnelVpnService : VpnService() {
 
         private const val TUNNEL_PORT = 8770
         private const val TUNNEL_MTU = 1400  // Must be ≤ (ext_iface_MTU - 28 UDP overhead). GCP ens4=1460, so 1400 is safe.
+        private const val TUN_IP = "10.20.0.2"
+        private val TUN_IP_INT: Int = run {
+            val parts = TUN_IP.split(".")
+            (parts[0].toInt() shl 24) or (parts[1].toInt() shl 16) or (parts[2].toInt() shl 8) or parts[3].toInt()
+        }
 
         private const val MAX_PACKET = 32767
 
@@ -479,6 +484,22 @@ class UdpTunnelVpnService : VpnService() {
                 try {
                     val n = input.read(buf)
                     if (n <= 0) continue
+
+                    // --- WireGuard-style packet filter ---
+                    // Drop non-IPv4
+                    val version = (buf[0].toInt() and 0xF0) shr 4
+                    if (version != 4) continue
+
+                    // Drop if source IP != TUN IP (crypto-key routing equivalent)
+                    // Prevents system traffic leakage through TUN
+                    val srcIp = ((buf[12].toInt() and 0xFF) shl 24) or
+                                ((buf[13].toInt() and 0xFF) shl 16) or
+                                ((buf[14].toInt() and 0xFF) shl 8) or
+                                 (buf[15].toInt() and 0xFF)
+                    if (srcIp != TUN_IP_INT) continue
+
+                    // Drop multicast (224.0.0.0/4) — discovery traffic
+                    if ((buf[16].toInt() and 0xFF) >= 224) continue
 
                     // Track flow
                     PacketFlowTracker.processPacket(buf.copyOf(n), isUplink = true)
