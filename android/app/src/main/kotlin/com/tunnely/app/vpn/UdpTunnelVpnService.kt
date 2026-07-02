@@ -119,6 +119,9 @@ class UdpTunnelVpnService : VpnService() {
 
         private var serviceInstance: UdpTunnelVpnService? = null
 
+        /** Get the current service instance for protect() calls */
+        fun getServiceInstance(): UdpTunnelVpnService? = serviceInstance
+
         fun connect(context: Context, prefs: VpnPreferences) {
             RemoteLogger.i(TAG, "🔵 UdpTunnelVpnService.connect() called")
             RemoteLogger.i(TAG, "  server=${prefs.serverAddress}:${prefs.serverPort}")

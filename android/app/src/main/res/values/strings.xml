@@ -3,5 +3,6 @@
     <string name="app_name">Tunnely</string>
     <string name="nav_connect">Connect</string>
     <string name="nav_flows">Flows</string>
+    <string name="nav_rtt">RTT</string>
     <string name="nav_settings">Settings</string>
 </resources>

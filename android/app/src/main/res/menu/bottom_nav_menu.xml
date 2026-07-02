@@ -9,6 +9,10 @@
         android:icon="@android:drawable/ic_menu_sort_by_size"
         android:title="@string/nav_flows" />
     <item
+        android:id="@+id/nav_rtt"
+        android:icon="@android:drawable/ic_menu_recent_history"
+        android:title="@string/nav_rtt" />
+    <item
         android:id="@+id/nav_settings"
         android:icon="@android:drawable/ic_menu_preferences"
         android:title="@string/nav_settings" />

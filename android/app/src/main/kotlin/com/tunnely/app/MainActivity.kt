@@ -6,6 +6,7 @@ import androidx.fragment.app.Fragment
 import com.google.android.material.bottomnavigation.BottomNavigationView
 import com.tunnely.app.ui.ConnectFragment
 import com.tunnely.app.ui.FlowsFragment
+import com.tunnely.app.ui.RttFragment
 import com.tunnely.app.ui.SettingsFragment
 
 class MainActivity : AppCompatActivity() {
@@ -24,6 +25,7 @@ class MainActivity : AppCompatActivity() {
             val fragment: Fragment = when (item.itemId) {
                 R.id.nav_connect -> ConnectFragment()
                 R.id.nav_flows -> FlowsFragment()
+                R.id.nav_rtt -> RttFragment()
                 R.id.nav_settings -> SettingsFragment()
                 else -> ConnectFragment()
             }
