@@ -251,12 +251,15 @@ class SettingsFragment : Fragment() {
         myPackage: String,
         prefs: VpnPreferences
     ): List<SplitTunnelApp> {
+        // Only show apps that have a launcher icon (user-facing apps)
+        val launcherPkgs = pm.queryIntentActivities(
+            android.content.Intent(android.content.Intent.ACTION_MAIN).addCategory(android.content.Intent.CATEGORY_LAUNCHER),
+            0
+        ).map { it.activityInfo.packageName }.toSet()
+
         return pm.getInstalledPackages(PackageManager.GET_PERMISSIONS)
             .filter { it.packageName != myPackage }
-            .filter { pkg ->
-                val perms = pkg.requestedPermissions
-                perms == null || perms.contains(android.Manifest.permission.INTERNET)
-            }
+            .filter { it.packageName in launcherPkgs }  // only user-visible apps
             .mapNotNull { pkg ->
                 val appInfo = pkg.applicationInfo ?: return@mapNotNull null
                 SplitTunnelApp(
